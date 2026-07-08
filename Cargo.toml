@@ -1,0 +1,14 @@
+[package]
+name = "jqr"
+version = "0.1.0"
+edition = "2021"
+description = "A small handwritten JSON formatter, fixer, and reporter."
+license = "MIT"
+
+[lib]
+name = "jqr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jqr"
+path = "src/main.rs"
