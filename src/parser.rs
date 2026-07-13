@@ -1,8 +1,12 @@
 use crate::ast::Value;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
-use crate::lexer::{lex, Token, TokenKind};
+use crate::lexer::{lex_with_mode, InputMode, Token, TokenKind};
 
 pub fn parse(source: &str) -> Result<Value, Vec<Diagnostic>> {
+    parse_with_mode(source, InputMode::Json)
+}
+
+pub fn parse_with_mode(source: &str, mode: InputMode) -> Result<Value, Vec<Diagnostic>> {
     if source.trim().is_empty() {
         return Err(vec![Diagnostic::new(
             "E000",
@@ -11,7 +15,7 @@ pub fn parse(source: &str) -> Result<Value, Vec<Diagnostic>> {
         )]);
     }
 
-    let (tokens, lex_errors) = lex(source);
+    let (tokens, lex_errors) = lex_with_mode(source, mode);
     if !lex_errors.is_empty() {
         return Err(lex_errors);
     }
@@ -19,6 +23,7 @@ pub fn parse(source: &str) -> Result<Value, Vec<Diagnostic>> {
     let mut parser = Parser {
         tokens,
         index: 0,
+        mode,
         diagnostics: Vec::new(),
     };
     let value = parser.parse_value();
@@ -42,6 +47,7 @@ pub fn parse(source: &str) -> Result<Value, Vec<Diagnostic>> {
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
+    mode: InputMode,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -99,6 +105,11 @@ impl Parser {
                     self.advance();
                     key
                 }
+                TokenKind::Identifier(key) if self.mode == InputMode::Json5 => {
+                    let key = key.clone();
+                    self.advance();
+                    key
+                }
                 _ => {
                     self.expected("object key string");
                     return None;
@@ -114,6 +125,9 @@ impl Parser {
             pairs.push((key, value));
 
             if self.consume_if(TokenDiscriminant::Comma) {
+                if self.mode == InputMode::Json5 && self.consume_if(TokenDiscriminant::RightBrace) {
+                    break;
+                }
                 continue;
             }
             if self.consume_if(TokenDiscriminant::RightBrace) {
@@ -138,6 +152,10 @@ impl Parser {
             values.push(self.parse_value()?);
 
             if self.consume_if(TokenDiscriminant::Comma) {
+                if self.mode == InputMode::Json5 && self.consume_if(TokenDiscriminant::RightBracket)
+                {
+                    break;
+                }
                 continue;
             }
             if self.consume_if(TokenDiscriminant::RightBracket) {
@@ -206,6 +224,7 @@ fn describe_token(kind: &TokenKind) -> String {
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
         TokenKind::String(_) => "string".to_string(),
+        TokenKind::Identifier(_) => "identifier".to_string(),
         TokenKind::Number(_) => "number".to_string(),
         TokenKind::True => "`true`".to_string(),
         TokenKind::False => "`false`".to_string(),
@@ -217,6 +236,8 @@ fn describe_token(kind: &TokenKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formatter::format_json;
+    use crate::lexer::InputMode;
 
     #[test]
     fn parses_nested_json() {
@@ -243,5 +264,43 @@ mod tests {
         let errors = parse(r#"{"name" "Ada"}"#).unwrap_err();
 
         assert!(matches!(errors[0].kind, DiagnosticKind::Expected(_)));
+    }
+
+    #[test]
+    fn parses_json5_keys_numbers_and_trailing_commas() {
+        let parsed =
+            parse_with_mode("{name: 'Ada', values: [0x10, +.5, 5.,],}", InputMode::Json5).unwrap();
+
+        assert_eq!(
+            parsed,
+            Value::Object(vec![
+                ("name".into(), Value::String("Ada".into())),
+                (
+                    "values".into(),
+                    Value::Array(vec![
+                        Value::Number("16".into()),
+                        Value::Number("0.5".into()),
+                        Value::Number("5.0".into()),
+                    ])
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn json5_output_round_trips_through_strict_parser() {
+        let value = parse_with_mode(
+            "// config\n{message: 'hello', enabled: true,}",
+            InputMode::Json5,
+        )
+        .unwrap();
+        let formatted = format_json(&value);
+
+        assert_eq!(parse(&formatted).unwrap(), value);
+    }
+
+    #[test]
+    fn strict_parser_rejects_json5_keys() {
+        assert!(parse("{name: 'Ada'}").is_err());
     }
 }

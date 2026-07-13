@@ -7,6 +7,7 @@ pub struct Stats {
     pub leaf_count: usize,
     pub original_size: usize,
     pub formatted_size: usize,
+    pub string_lengths: [usize; 6],
 }
 
 impl Stats {
@@ -17,6 +18,7 @@ impl Stats {
             leaf_count: 0,
             original_size,
             formatted_size,
+            string_lengths: [0; 6],
         };
         stats.visit(value, 1);
         stats
@@ -31,7 +33,7 @@ impl Stats {
     }
 
     pub fn render(&self, was_valid: bool, fix_count: usize) -> String {
-        format!(
+        let mut output = format!(
             "stats:\n  keys: {}\n  max_depth: {}\n  leaves: {}\n  size_ratio: {:.2}\n  valid_json: {}\n  fixes: {}",
             self.key_count,
             self.max_depth,
@@ -39,7 +41,26 @@ impl Stats {
             self.compression_ratio(),
             was_valid,
             fix_count
-        )
+        );
+        output.push_str("\n  string_lengths:");
+        let largest = self.string_lengths.iter().copied().max().unwrap_or(0);
+        for (label, count) in ["0", "1-4", "5-8", "9-16", "17-32", "33+"]
+            .iter()
+            .zip(self.string_lengths)
+        {
+            let width = if count == 0 || largest == 0 {
+                0
+            } else {
+                (count * 24).div_ceil(largest)
+            };
+            output.push_str(&format!(
+                "\n  {:<4} | {:<24} {}",
+                label,
+                "#".repeat(width),
+                count
+            ));
+        }
+        output
     }
 
     fn visit(&mut self, value: &Value, depth: usize) {
@@ -50,7 +71,8 @@ impl Stats {
                     self.leaf_count += 1;
                 }
                 self.key_count += pairs.len();
-                for (_, value) in pairs {
+                for (key, value) in pairs {
+                    self.record_string_length(key);
                     self.visit(value, depth + 1);
                 }
             }
@@ -62,10 +84,27 @@ impl Stats {
                     self.visit(value, depth + 1);
                 }
             }
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            Value::String(text) => {
+                self.record_string_length(text);
+                self.leaf_count += 1;
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {
                 self.leaf_count += 1;
             }
         }
+    }
+
+    fn record_string_length(&mut self, text: &str) {
+        let length = text.chars().count();
+        let bucket = match length {
+            0 => 0,
+            1..=4 => 1,
+            5..=8 => 2,
+            9..=16 => 3,
+            17..=32 => 4,
+            _ => 5,
+        };
+        self.string_lengths[bucket] += 1;
     }
 }
 
@@ -89,5 +128,34 @@ mod tests {
         assert_eq!(stats.max_depth, 3);
         assert_eq!(stats.leaf_count, 3);
         assert_eq!(stats.compression_ratio(), 0.5);
+    }
+
+    #[test]
+    fn buckets_key_and_value_lengths_by_unicode_characters() {
+        let value = Value::Object(vec![
+            ("".into(), Value::String("中文".into())),
+            ("a".into(), Value::String("123456789".into())),
+            ("abcde".into(), Value::Null),
+            ("12345678901234567".into(), Value::Bool(true)),
+            ("tail".into(), Value::String("x".repeat(33))),
+        ]);
+
+        let stats = Stats::from_value(&value, 1, 1);
+
+        assert_eq!(stats.string_lengths, [1, 3, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn renders_scaled_string_length_histogram() {
+        let value = Value::Object(vec![
+            ("a".into(), Value::String("b".into())),
+            ("five5".into(), Value::String("123456789".into())),
+        ]);
+        let rendered = Stats::from_value(&value, 1, 1).render(true, 0);
+
+        assert!(rendered.contains("string_lengths:"));
+        assert!(rendered.contains("1-4  | ######################## 2"));
+        assert!(rendered.contains("5-8  | ############             1"));
+        assert!(rendered.contains("33+  |                          0"));
     }
 }
