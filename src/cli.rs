@@ -1,5 +1,5 @@
 use std::env;
-use std::fs;
+use std::fs::File;
 use std::io::{self, IsTerminal, Read};
 
 use crate::diagnostic::{
@@ -8,7 +8,7 @@ use crate::diagnostic::{
 use crate::fixer;
 use crate::formatter::format_json;
 use crate::lexer::InputMode;
-use crate::parser::parse_with_mode;
+use crate::parser::{parse_with_mode, MAX_INPUT_BYTES};
 use crate::stats::Stats;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,15 +165,33 @@ fn parse_args(args: Vec<String>) -> Result<Options, Diagnostic> {
 
 fn read_input(options: &Options) -> Result<String, Diagnostic> {
     if let Some(path) = &options.input {
-        fs::read_to_string(path)
-            .map_err(|err| Diagnostic::new("E011", DiagnosticKind::Io(err.to_string()), None))
-    } else {
-        let mut input = String::new();
-        io::stdin()
-            .read_to_string(&mut input)
+        let file = File::open(path)
             .map_err(|err| Diagnostic::new("E011", DiagnosticKind::Io(err.to_string()), None))?;
-        Ok(input)
+        read_limited(file)
+    } else {
+        read_limited(io::stdin().lock())
     }
+}
+
+fn read_limited<R: Read>(reader: R) -> Result<String, Diagnostic> {
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|err| Diagnostic::new("E011", DiagnosticKind::Io(err.to_string()), None))?;
+
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(Diagnostic::new(
+            "E014",
+            DiagnosticKind::InputTooLarge {
+                max_bytes: MAX_INPUT_BYTES,
+            },
+            None,
+        ));
+    }
+
+    String::from_utf8(bytes)
+        .map_err(|err| Diagnostic::new("E011", DiagnosticKind::Io(err.to_string()), None))
 }
 
 fn print_help() {
@@ -185,6 +203,9 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    use crate::parser::MAX_INPUT_BYTES;
 
     #[test]
     fn parses_cli_flags() {
@@ -225,5 +246,28 @@ mod tests {
 
         assert!(matches!(missing.kind, DiagnosticKind::InvalidArgument(_)));
         assert!(matches!(invalid.kind, DiagnosticKind::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn limited_reader_accepts_exact_size_limit() {
+        let input = vec![b'a'; MAX_INPUT_BYTES];
+
+        let output = read_limited(Cursor::new(input)).unwrap();
+
+        assert_eq!(output.len(), MAX_INPUT_BYTES);
+    }
+
+    #[test]
+    fn limited_reader_rejects_oversized_input() {
+        let input = vec![b'a'; MAX_INPUT_BYTES + 1];
+
+        let error = read_limited(Cursor::new(input)).unwrap_err();
+
+        assert_eq!(
+            error.kind,
+            DiagnosticKind::InputTooLarge {
+                max_bytes: MAX_INPUT_BYTES
+            }
+        );
     }
 }

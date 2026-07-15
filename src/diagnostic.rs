@@ -63,6 +63,8 @@ pub enum DiagnosticKind {
     InvalidNumber,
     UnterminatedBlockComment,
     NonFiniteNumber,
+    InputTooLarge { max_bytes: usize },
+    NestingTooDeep { max_depth: usize },
     Expected(String),
     UnexpectedToken(String),
     TrailingInput,
@@ -122,6 +124,18 @@ impl Diagnostic {
             }
             (DiagnosticKind::NonFiniteNumber, Language::Zh) => {
                 "非有限数值无法无损转换为标准 JSON".to_string()
+            }
+            (DiagnosticKind::InputTooLarge { max_bytes }, Language::En) => {
+                format!("input exceeds the {} byte limit", max_bytes)
+            }
+            (DiagnosticKind::InputTooLarge { max_bytes }, Language::Zh) => {
+                format!("输入超过 {} 字节限制", max_bytes)
+            }
+            (DiagnosticKind::NestingTooDeep { max_depth }, Language::En) => {
+                format!("JSON nesting exceeds the {} level limit", max_depth)
+            }
+            (DiagnosticKind::NestingTooDeep { max_depth }, Language::Zh) => {
+                format!("JSON 嵌套超过 {} 层限制", max_depth)
             }
             (DiagnosticKind::InvalidNumber, Language::Zh) => "非法数字".to_string(),
             (DiagnosticKind::Expected(expected), Language::En) => {

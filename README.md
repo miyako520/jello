@@ -2,6 +2,20 @@
 
 `jqr` is a small Rust JSON formatter and repair-oriented parser experiment. It uses a handwritten lexer and recursive descent parser so diagnostics and repair behavior stay under project control.
 
+The executable and Rust package are named `jqr`; the source repository is hosted as [`miyako520/jello`](https://github.com/miyako520/jello).
+
+## Installation
+
+Install the latest source revision with Rust 1.73 or newer:
+
+```powershell
+cargo install --git https://github.com/miyako520/jello --locked
+```
+
+After a version is tagged, prebuilt Linux, macOS, and Windows archives and `SHA256SUMS` are published on the [GitHub Releases page](https://github.com/miyako520/jello/releases). Verify the archive checksum before placing `jqr` or `jqr.exe` on your `PATH`.
+
+The project is not yet published to crates.io or Homebrew, so `cargo install jqr` and `brew install jqr` are not supported installation paths yet.
+
 ## Quick Start
 
 ```powershell
@@ -31,6 +45,12 @@ cargo run -- --json5 --color always config.json5
 - `--lang zh` and `--lang en` switch diagnostic text.
 - Diagnostics use Rust compiler-style source context and arrows.
 - `--color auto|always|never` controls ANSI color. `NO_COLOR` always disables color.
+
+## Limits
+
+- Inputs are limited to 16 MiB from files, stdin, and the parser library API.
+- Arrays and objects may be nested up to 256 levels.
+- JSON5 `Infinity` and `NaN` are rejected because standard JSON cannot represent them without changing their meaning.
 
 ## Examples
 
@@ -69,8 +89,10 @@ cargo run -- --json5 --stats config.json5
 
 - Add more parser recovery paths.
 - Add JSON Schema validation.
-- Add GitHub Actions release builds for Linux, macOS, and Windows.
-- Add Homebrew and `cargo install` publishing instructions once the package is published.
+
+## Releasing
+
+The tag-driven release workflow requires the tag and Cargo package version to match. After CI succeeds on the intended commit, create and push a signed or annotated tag such as `v0.1.0`; GitHub Actions builds the platform archives, generates checksums, and creates the GitHub release. Tags containing a hyphen, such as `v0.2.0-alpha.1`, produce prereleases.
 
 ## Comparison
 

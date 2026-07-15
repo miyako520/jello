@@ -2,11 +2,23 @@ use crate::ast::Value;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::lexer::{lex_with_mode, InputMode, Token, TokenKind};
 
+pub const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_NESTING_DEPTH: usize = 256;
+
 pub fn parse(source: &str) -> Result<Value, Vec<Diagnostic>> {
     parse_with_mode(source, InputMode::Json)
 }
 
 pub fn parse_with_mode(source: &str, mode: InputMode) -> Result<Value, Vec<Diagnostic>> {
+    if source.len() > MAX_INPUT_BYTES {
+        return Err(vec![Diagnostic::new(
+            "E014",
+            DiagnosticKind::InputTooLarge {
+                max_bytes: MAX_INPUT_BYTES,
+            },
+            None,
+        )]);
+    }
     if source.trim().is_empty() {
         return Err(vec![Diagnostic::new(
             "E000",
@@ -26,7 +38,7 @@ pub fn parse_with_mode(source: &str, mode: InputMode) -> Result<Value, Vec<Diagn
         mode,
         diagnostics: Vec::new(),
     };
-    let value = parser.parse_value();
+    let value = parser.parse_value(0);
 
     if parser.diagnostics.is_empty() && !matches!(parser.current().kind, TokenKind::Eof) {
         let span = parser.current().span;
@@ -52,7 +64,23 @@ struct Parser {
 }
 
 impl Parser {
-    fn parse_value(&mut self) -> Option<Value> {
+    fn parse_value(&mut self, depth: usize) -> Option<Value> {
+        if depth >= MAX_NESTING_DEPTH
+            && matches!(
+                self.current().kind,
+                TokenKind::LeftBrace | TokenKind::LeftBracket
+            )
+        {
+            let span = self.current().span;
+            self.diagnostics.push(Diagnostic::new(
+                "E015",
+                DiagnosticKind::NestingTooDeep {
+                    max_depth: MAX_NESTING_DEPTH,
+                },
+                Some(span),
+            ));
+            return None;
+        }
         match &self.current().kind {
             TokenKind::Null => {
                 self.advance();
@@ -76,8 +104,8 @@ impl Parser {
                 self.advance();
                 Some(Value::String(text))
             }
-            TokenKind::LeftBrace => self.parse_object(),
-            TokenKind::LeftBracket => self.parse_array(),
+            TokenKind::LeftBrace => self.parse_object(depth),
+            TokenKind::LeftBracket => self.parse_array(depth),
             other => {
                 let span = self.current().span;
                 self.diagnostics.push(Diagnostic::new(
@@ -90,7 +118,7 @@ impl Parser {
         }
     }
 
-    fn parse_object(&mut self) -> Option<Value> {
+    fn parse_object(&mut self, depth: usize) -> Option<Value> {
         self.advance();
         let mut pairs = Vec::new();
 
@@ -121,7 +149,7 @@ impl Parser {
                 return None;
             }
 
-            let value = self.parse_value()?;
+            let value = self.parse_value(depth + 1)?;
             pairs.push((key, value));
 
             if self.consume_if(TokenDiscriminant::Comma) {
@@ -140,7 +168,7 @@ impl Parser {
         Some(Value::Object(pairs))
     }
 
-    fn parse_array(&mut self) -> Option<Value> {
+    fn parse_array(&mut self, depth: usize) -> Option<Value> {
         self.advance();
         let mut values = Vec::new();
 
@@ -149,7 +177,7 @@ impl Parser {
         }
 
         loop {
-            values.push(self.parse_value()?);
+            values.push(self.parse_value(depth + 1)?);
 
             if self.consume_if(TokenDiscriminant::Comma) {
                 if self.mode == InputMode::Json5 && self.consume_if(TokenDiscriminant::RightBracket)
@@ -302,5 +330,34 @@ mod tests {
     #[test]
     fn strict_parser_rejects_json5_keys() {
         assert!(parse("{name: 'Ada'}").is_err());
+    }
+
+    #[test]
+    fn rejects_input_over_size_limit() {
+        let input = " ".repeat(MAX_INPUT_BYTES + 1);
+
+        let errors = parse(&input).unwrap_err();
+
+        assert_eq!(
+            errors[0].kind,
+            DiagnosticKind::InputTooLarge {
+                max_bytes: MAX_INPUT_BYTES
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_nesting_over_depth_limit() {
+        let depth = MAX_NESTING_DEPTH + 1;
+        let input = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+
+        let errors = parse(&input).unwrap_err();
+
+        assert_eq!(
+            errors[0].kind,
+            DiagnosticKind::NestingTooDeep {
+                max_depth: MAX_NESTING_DEPTH
+            }
+        );
     }
 }
