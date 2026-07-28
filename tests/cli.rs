@@ -161,7 +161,7 @@ fn validates_option_conflicts_and_values() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn reads_non_unicode_path_without_panicking() {
     use std::os::unix::ffi::OsStringExt;
