@@ -1,9 +1,168 @@
-pub mod ast;
-pub mod cli;
-pub mod diagnostic;
-pub mod fixer;
-pub mod formatter;
-pub mod lexer;
-pub mod parser;
-pub mod span;
-pub mod stats;
+//! Handwritten JSON parsing, formatting, diagnostics, and conservative repair.
+
+mod ast;
+mod cli;
+mod diagnostic;
+mod fixer;
+mod formatter;
+mod lexer;
+mod parser;
+mod span;
+mod stats;
+
+pub use diagnostic::{ColorChoice, Diagnostic, DiagnosticKind, Language};
+pub use fixer::FixEdit;
+pub use formatter::{FormatError, FormatOptions, MAX_INDENT_WIDTH, MAX_OUTPUT_BYTES};
+pub use lexer::{MAX_DIAGNOSTICS, MAX_REPAIR_EDITS, MAX_TOKENS};
+pub use parser::{MAX_INPUT_BYTES, MAX_NESTING_DEPTH};
+pub use span::{Position, Span};
+pub use stats::Stats;
+
+use ast::Value;
+use lexer::InputMode;
+
+/// A parsed JSON document.
+///
+/// Its syntax tree is intentionally opaque so callers cannot construct values
+/// that violate JSON number or string invariants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Document(Value);
+
+/// The result of a successful repair attempt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairResult {
+    pub document: Document,
+    pub output: String,
+    pub edits: Vec<FixEdit>,
+}
+
+/// Whether repair edits were needed or the input could not be recovered safely.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RepairOutcome {
+    /// The input was valid strict JSON and needed no repair edits.
+    /// The canonical formatted output may still differ from the input.
+    Valid(RepairResult),
+    Repaired(RepairResult),
+    Unrepairable(Vec<Diagnostic>),
+}
+
+/// Parse strict RFC 8259 JSON.
+///
+/// Inputs larger than [`MAX_INPUT_BYTES`] or nested beyond
+/// [`MAX_NESTING_DEPTH`] are rejected.
+pub fn parse(source: &str) -> Result<Document, Vec<Diagnostic>> {
+    parser::parse(source).map(Document)
+}
+
+/// Parse the documented, finite-number JSON5 subset.
+///
+/// The accepted subset includes comments, quoted and unquoted keys, trailing
+/// commas, hexadecimal numbers, leading plus signs, and string continuations.
+pub fn parse_json5(source: &str) -> Result<Document, Vec<Diagnostic>> {
+    parser::parse_with_mode(source, InputMode::Json5).map(Document)
+}
+
+/// Format a parsed document using validated options.
+pub fn format(document: &Document, options: FormatOptions) -> Result<String, FormatError> {
+    formatter::format_json_with_options(&document.0, options)
+}
+
+/// Conservatively repair common structural JSON mistakes.
+///
+/// Successful output is always parsed again by the repair path as strict JSON
+/// before it is returned.
+pub fn repair(source: &str) -> RepairOutcome {
+    repair_with_mode(source, InputMode::Json)
+}
+
+/// Repair structural mistakes and normalize the supported JSON5 subset.
+pub fn repair_json5(source: &str) -> RepairOutcome {
+    repair_with_mode(source, InputMode::Json5)
+}
+
+fn repair_with_mode(source: &str, mode: InputMode) -> RepairOutcome {
+    match fixer::fix(source, mode) {
+        Ok(result) => {
+            let public = RepairResult {
+                document: Document(result.value),
+                output: result.output,
+                edits: result.edits,
+            };
+            if public.edits.is_empty() {
+                RepairOutcome::Valid(public)
+            } else {
+                RepairOutcome::Repaired(public)
+            }
+        }
+        Err(diagnostics) => RepairOutcome::Unrepairable(diagnostics),
+    }
+}
+
+/// Calculate structural statistics for a parsed document.
+pub fn statistics(document: &Document, original_size: usize, formatted_size: usize) -> Stats {
+    Stats::from_value(&document.0, original_size, formatted_size)
+}
+
+/// Run the command-line interface.
+///
+/// This entry point is public only so the package's binary target can call it.
+#[doc(hidden)]
+pub fn run_cli() -> i32 {
+    cli::run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_api_formats_with_default_and_custom_indentation() {
+        let document = parse(r#"{"a":[1,true]}"#).unwrap();
+
+        assert_eq!(
+            format(&document, FormatOptions::default()).unwrap(),
+            "{\n  \"a\": [\n    1,\n    true\n  ]\n}"
+        );
+        assert_eq!(
+            format(&document, FormatOptions::pretty(4).unwrap()).unwrap(),
+            "{\n    \"a\": [\n        1,\n        true\n    ]\n}"
+        );
+        assert!(FormatOptions::pretty(17).is_err());
+    }
+
+    #[test]
+    fn public_api_formats_compact_json() {
+        let document = parse(r#"{"a":[1,true]}"#).unwrap();
+
+        assert_eq!(
+            format(&document, FormatOptions::compact()).unwrap(),
+            r#"{"a":[1,true]}"#
+        );
+    }
+
+    #[test]
+    fn public_api_converts_supported_json5_to_strict_json() {
+        let document = parse_json5("{message: 'hello', values: [0x10,],}").unwrap();
+        let output = format(&document, FormatOptions::compact()).unwrap();
+
+        assert_eq!(output, r#"{"message":"hello","values":[16]}"#);
+        assert!(parse(&output).is_ok());
+    }
+
+    #[test]
+    fn public_api_reports_valid_input_without_claiming_unchanged_output() {
+        let source = r#"{"a":1}"#;
+        let RepairOutcome::Valid(result) = repair(source) else {
+            panic!("valid strict JSON must not require repairs");
+        };
+        assert!(result.edits.is_empty());
+        assert_ne!(result.output, source);
+
+        assert!(matches!(repair("{a:1}"), RepairOutcome::Unrepairable(_)));
+        assert!(matches!(repair_json5("{a:1}"), RepairOutcome::Repaired(_)));
+        assert!(matches!(
+            repair(r#"{"a" 1}"#),
+            RepairOutcome::Unrepairable(_)
+        ));
+    }
+}

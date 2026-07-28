@@ -3,5 +3,5 @@
 version = 3
 
 [[package]]
-name = "jqr"
+name = "jello"
 version = "0.1.0"

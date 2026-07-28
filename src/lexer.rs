@@ -1,6 +1,10 @@
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::span::{Position, Span};
 
+pub const MAX_DIAGNOSTICS: usize = 64;
+pub const MAX_TOKENS: usize = 250_000;
+pub const MAX_REPAIR_EDITS: usize = 10_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Json,
@@ -30,12 +34,27 @@ pub struct Token {
     pub span: Span,
 }
 
-pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LexEdit {
+    pub(crate) position: Position,
+    pub(crate) description: &'static str,
+}
+
+#[cfg(test)]
+fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
     lex_with_mode(source, InputMode::Json)
 }
 
 pub fn lex_with_mode(source: &str, mode: InputMode) -> (Vec<Token>, Vec<Diagnostic>) {
-    Lexer::new(source, mode).lex()
+    let (tokens, diagnostics, _) = Lexer::new(source, mode, false).lex();
+    (tokens, diagnostics)
+}
+
+pub(crate) fn lex_for_repair(
+    source: &str,
+    mode: InputMode,
+) -> (Vec<Token>, Vec<Diagnostic>, Vec<LexEdit>) {
+    Lexer::new(source, mode, true).lex()
 }
 
 struct Lexer<'a> {
@@ -45,11 +64,14 @@ struct Lexer<'a> {
     line: usize,
     column: usize,
     tokens: Vec<Token>,
+    previous_was_cr: bool,
     diagnostics: Vec<Diagnostic>,
+    audit_normalizations: bool,
+    edits: Vec<LexEdit>,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str, mode: InputMode) -> Self {
+    fn new(source: &'a str, mode: InputMode, audit_normalizations: bool) -> Self {
         Self {
             source,
             mode,
@@ -57,16 +79,57 @@ impl<'a> Lexer<'a> {
             line: 1,
             column: 1,
             tokens: Vec::new(),
+            previous_was_cr: false,
             diagnostics: Vec::new(),
+            audit_normalizations,
+            edits: Vec::new(),
         }
     }
 
-    fn lex(mut self) -> (Vec<Token>, Vec<Diagnostic>) {
+    fn lex(mut self) -> (Vec<Token>, Vec<Diagnostic>, Vec<LexEdit>) {
+        if self
+            .diagnostics
+            .try_reserve_exact(MAX_DIAGNOSTICS + 1)
+            .is_err()
+        {
+            return (
+                Vec::new(),
+                vec![Diagnostic::new(
+                    "E020",
+                    DiagnosticKind::AllocationFailed,
+                    None,
+                )],
+                Vec::new(),
+            );
+        }
+        let token_capacity = self
+            .source
+            .len()
+            .saturating_add(1)
+            .min(MAX_TOKENS.saturating_add(1));
+        if self.tokens.try_reserve_exact(token_capacity).is_err() {
+            self.diagnostics.push(Diagnostic::new(
+                "E020",
+                DiagnosticKind::AllocationFailed,
+                None,
+            ));
+            return (self.tokens, self.diagnostics, self.edits);
+        }
+        if self.audit_normalizations {
+            let edit_capacity = self.source.len().min(MAX_REPAIR_EDITS);
+            if self.edits.try_reserve_exact(edit_capacity).is_err() {
+                self.diagnostics.push(Diagnostic::new(
+                    "E020",
+                    DiagnosticKind::AllocationFailed,
+                    None,
+                ));
+                return (self.tokens, self.diagnostics, self.edits);
+            }
+        }
+
         while let Some(ch) = self.peek() {
             match ch {
-                c if c.is_whitespace() => {
-                    self.bump();
-                }
+                c if is_whitespace(c, self.mode) => self.lex_whitespace(),
                 '/' if self.mode == InputMode::Json5 => self.lex_comment(),
                 '{' => self.simple(TokenKind::LeftBrace),
                 '}' => self.simple(TokenKind::RightBrace),
@@ -95,6 +158,27 @@ impl<'a> Lexer<'a> {
                     ));
                 }
             }
+
+            if self.diagnostics.len() >= MAX_DIAGNOSTICS && self.peek().is_some() {
+                self.diagnostics.push(Diagnostic::new(
+                    "E017",
+                    DiagnosticKind::TooManyErrors {
+                        max_errors: MAX_DIAGNOSTICS,
+                    },
+                    Some(Span::new(self.position(), self.position())),
+                ));
+                break;
+            }
+            if self.tokens.len() >= MAX_TOKENS && self.peek().is_some() {
+                self.diagnostics.push(Diagnostic::new(
+                    "E018",
+                    DiagnosticKind::TooManyTokens {
+                        max_tokens: MAX_TOKENS,
+                    },
+                    Some(Span::new(self.position(), self.position())),
+                ));
+                break;
+            }
         }
 
         let pos = self.position();
@@ -102,7 +186,7 @@ impl<'a> Lexer<'a> {
             kind: TokenKind::Eof,
             span: Span::new(pos, pos),
         });
-        (self.tokens, self.diagnostics)
+        (self.tokens, self.diagnostics, self.edits)
     }
 
     fn simple(&mut self, kind: TokenKind) {
@@ -116,7 +200,14 @@ impl<'a> Lexer<'a> {
 
     fn lex_keyword(&mut self, expected: &str, kind: TokenKind) {
         let start = self.position();
-        if self.source[self.index..].starts_with(expected) {
+        let keyword_end = self.index.saturating_add(expected.len());
+        let has_boundary = self
+            .source
+            .get(keyword_end..)
+            .and_then(|suffix| suffix.chars().next())
+            .map(|ch| !is_identifier_continue(ch))
+            .unwrap_or(true);
+        if self.source[self.index..].starts_with(expected) && has_boundary {
             for _ in expected.chars() {
                 self.bump();
             }
@@ -125,7 +216,10 @@ impl<'a> Lexer<'a> {
                 span: Span::new(start, self.position()),
             });
         } else {
-            let ch = self.bump().unwrap_or('\0');
+            let ch = self.peek().unwrap_or('\0');
+            while matches!(self.peek(), Some(current) if is_identifier_continue(current)) {
+                self.bump();
+            }
             self.diagnostics.push(Diagnostic::new(
                 "E001",
                 DiagnosticKind::InvalidCharacter(ch),
@@ -134,18 +228,41 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    fn lex_whitespace(&mut self) {
+        let mut normalization = None;
+        while let Some(ch) = self.peek() {
+            if !is_whitespace(ch, self.mode) {
+                break;
+            }
+            if self.mode == InputMode::Json5
+                && !is_whitespace(ch, InputMode::Json)
+                && normalization.is_none()
+            {
+                normalization = Some(self.position());
+            }
+            self.bump();
+        }
+        if let Some(position) = normalization {
+            self.record_normalization(position, "removed JSON5-only whitespace");
+        }
+    }
     fn lex_comment(&mut self) {
         let start = self.position();
         self.bump();
         match self.peek() {
             Some('/') => {
                 self.bump();
-                while !matches!(self.peek(), None | Some('\n' | '\r')) {
+                self.record_normalization(start, "removed JSON5 line comment");
+                while !matches!(
+                    self.peek(),
+                    None | Some('\n' | '\r' | '\u{2028}' | '\u{2029}')
+                ) {
                     self.bump();
                 }
             }
             Some('*') => {
                 self.bump();
+                self.record_normalization(start, "removed JSON5 block comment");
                 loop {
                     match (self.peek(), self.peek_next()) {
                         (Some('*'), Some('/')) => {
@@ -222,10 +339,19 @@ impl<'a> Lexer<'a> {
                     return;
                 }
                 '\\' => {
+                    let escape_start = self.position();
                     self.bump();
                     match self.bump() {
                         Some('"') => value.push('"'),
-                        Some('\'') if self.mode == InputMode::Json5 => value.push('\''),
+                        Some('\'') if self.mode == InputMode::Json5 => {
+                            if quote == '"' {
+                                self.record_normalization(
+                                    escape_start,
+                                    "normalized JSON5 apostrophe escape",
+                                );
+                            }
+                            value.push('\'');
+                        }
                         Some('\\') => value.push('\\'),
                         Some('/') => value.push('/'),
                         Some('b') => value.push('\u{0008}'),
@@ -233,11 +359,20 @@ impl<'a> Lexer<'a> {
                         Some('n') => value.push('\n'),
                         Some('r') => value.push('\r'),
                         Some('t') => value.push('\t'),
-                        Some('\n') if self.mode == InputMode::Json5 => {}
+                        Some('\n' | '\u{2028}' | '\u{2029}') if self.mode == InputMode::Json5 => {
+                            self.record_normalization(
+                                escape_start,
+                                "removed JSON5 string line continuation",
+                            );
+                        }
                         Some('\r') if self.mode == InputMode::Json5 => {
                             if self.peek() == Some('\n') {
                                 self.bump();
                             }
+                            self.record_normalization(
+                                escape_start,
+                                "removed JSON5 string line continuation",
+                            );
                         }
                         Some('u') => match self.read_unicode_escape() {
                             Some(decoded) => value.push(decoded),
@@ -245,8 +380,9 @@ impl<'a> Lexer<'a> {
                                 self.diagnostics.push(Diagnostic::new(
                                     "E004",
                                     DiagnosticKind::InvalidUnicodeEscape,
-                                    Some(Span::new(start, self.position())),
+                                    Some(Span::new(escape_start, self.position())),
                                 ));
+                                self.synchronize_string(quote);
                                 return;
                             }
                         },
@@ -254,20 +390,33 @@ impl<'a> Lexer<'a> {
                             self.diagnostics.push(Diagnostic::new(
                                 "E003",
                                 DiagnosticKind::InvalidEscape(other),
-                                Some(Span::new(start, self.position())),
+                                Some(Span::new(escape_start, self.position())),
                             ));
+                            self.synchronize_string(quote);
                             return;
                         }
                         None => break,
                     }
                 }
-                '\n' | '\r' => {
+                control @ '\u{0000}'..='\u{001F}' => {
+                    let control_start = self.position();
+                    self.bump();
                     self.diagnostics.push(Diagnostic::new(
-                        "E002",
-                        DiagnosticKind::UnterminatedString,
-                        Some(Span::new(start, self.position())),
+                        "E016",
+                        DiagnosticKind::UnescapedControlCharacter(control),
+                        Some(Span::new(control_start, self.position())),
                     ));
+                    self.synchronize_string(quote);
                     return;
+                }
+                separator @ ('\u{2028}' | '\u{2029}') => {
+                    let position = self.position();
+                    self.record_normalization(
+                        position,
+                        "escaped Unicode line separator in formatted output",
+                    );
+                    value.push(separator);
+                    self.bump();
                 }
                 other => {
                     value.push(other);
@@ -283,7 +432,45 @@ impl<'a> Lexer<'a> {
         ));
     }
 
+    fn synchronize_string(&mut self, quote: char) {
+        let mut escaped = false;
+        while let Some(ch) = self.peek() {
+            self.bump();
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                return;
+            }
+        }
+    }
+
     fn read_unicode_escape(&mut self) -> Option<char> {
+        let high = self.read_hex_code_unit()?;
+        if (0xD800..=0xDBFF).contains(&high) {
+            if self.peek() != Some('\\') {
+                return None;
+            }
+            self.bump();
+            if self.peek() != Some('u') {
+                return None;
+            }
+            self.bump();
+            let low = self.read_hex_code_unit()?;
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return None;
+            }
+            let scalar = 0x10000 + (((high as u32) - 0xD800) << 10) + ((low as u32) - 0xDC00);
+            return char::from_u32(scalar);
+        }
+        if (0xDC00..=0xDFFF).contains(&high) {
+            return None;
+        }
+        char::from_u32(high as u32)
+    }
+
+    fn read_hex_code_unit(&mut self) -> Option<u16> {
         let mut digits = String::new();
         for _ in 0..4 {
             let ch = self.peek()?;
@@ -293,9 +480,7 @@ impl<'a> Lexer<'a> {
             digits.push(ch);
             self.bump();
         }
-        u32::from_str_radix(&digits, 16)
-            .ok()
-            .and_then(char::from_u32)
+        u16::from_str_radix(&digits, 16).ok()
     }
 
     fn lex_number(&mut self) {
@@ -356,6 +541,7 @@ impl<'a> Lexer<'a> {
             } else {
                 value.to_string()
             };
+            self.record_normalization(start, "normalized JSON5 hexadecimal number");
             self.tokens.push(Token {
                 kind: TokenKind::Number(text),
                 span: Span::new(start, self.position()),
@@ -434,9 +620,33 @@ impl<'a> Lexer<'a> {
                 text.push('0');
             }
         }
+        if text.as_str() != &self.source[start_index..self.index] {
+            self.record_normalization(start, "normalized JSON5 number");
+        }
         self.tokens.push(Token {
             kind: TokenKind::Number(text),
             span: Span::new(start, self.position()),
+        });
+    }
+
+    fn record_normalization(&mut self, position: Position, description: &'static str) {
+        if !self.audit_normalizations {
+            return;
+        }
+        if self.edits.len() >= MAX_REPAIR_EDITS {
+            self.diagnostics.push(Diagnostic::new(
+                "E021",
+                DiagnosticKind::TooManyRepairs {
+                    max_repairs: MAX_REPAIR_EDITS,
+                },
+                Some(Span::new(position, position)),
+            ));
+            self.audit_normalizations = false;
+            return;
+        }
+        self.edits.push(LexEdit {
+            position,
+            description,
         });
     }
 
@@ -461,17 +671,51 @@ impl<'a> Lexer<'a> {
     fn bump(&mut self) -> Option<char> {
         let ch = self.peek()?;
         self.index += ch.len_utf8();
-        if ch == '\n' {
-            self.line += 1;
-            self.column = 1;
-        } else {
-            self.column += 1;
+        match ch {
+            '\r' => {
+                self.line += 1;
+                self.column = 1;
+                self.previous_was_cr = true;
+            }
+            '\n' if self.previous_was_cr => {
+                self.column = 1;
+                self.previous_was_cr = false;
+            }
+            '\n' | '\u{2028}' | '\u{2029}' => {
+                self.line += 1;
+                self.column = 1;
+                self.previous_was_cr = false;
+            }
+            _ => {
+                self.column += 1;
+                self.previous_was_cr = false;
+            }
         }
         Some(ch)
     }
 
     fn position(&self) -> Position {
         Position::new(self.index, self.line, self.column)
+    }
+}
+
+pub(crate) fn is_whitespace(ch: char, mode: InputMode) -> bool {
+    match mode {
+        InputMode::Json => matches!(ch, ' ' | '\t' | '\r' | '\n'),
+        InputMode::Json5 => matches!(
+            ch,
+            '\u{0009}'..='\u{000D}'
+                | '\u{0020}'
+                | '\u{00A0}'
+                | '\u{1680}'
+                | '\u{2000}'..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+        ),
     }
 }
 
@@ -563,5 +807,142 @@ mod tests {
             let (_, diagnostics) = lex_with_mode(source, InputMode::Json5);
             assert_eq!(diagnostics[0].kind, DiagnosticKind::NonFiniteNumber);
         }
+    }
+
+    #[test]
+    fn strict_mode_rejects_non_json_whitespace() {
+        let (_, diagnostics) = lex("\u{00a0}{}");
+
+        assert!(matches!(
+            diagnostics[0].kind,
+            DiagnosticKind::InvalidCharacter('\u{00a0}')
+        ));
+    }
+
+    #[test]
+    fn strict_mode_rejects_raw_control_characters_in_strings() {
+        let (_, diagnostics) = lex("\"before\tafter\"");
+
+        assert!(matches!(
+            diagnostics[0].kind,
+            DiagnosticKind::UnescapedControlCharacter('\t')
+        ));
+    }
+
+    #[test]
+    fn decodes_unicode_surrogate_pairs() {
+        let (tokens, diagnostics) = lex(r#""\uD83D\uDE00""#);
+
+        assert!(diagnostics.is_empty());
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::String("😀".into())));
+    }
+
+    #[test]
+    fn rejects_lone_unicode_surrogates() {
+        for source in [r#""\uD83D""#, r#""\uDE00""#] {
+            let (_, diagnostics) = lex(source);
+
+            assert_eq!(diagnostics[0].kind, DiagnosticKind::InvalidUnicodeEscape);
+        }
+    }
+
+    #[test]
+    fn tracks_json_and_json5_line_terminators() {
+        for (source, mode, byte) in [
+            ("\r@", InputMode::Json, 1),
+            ("\r\n@", InputMode::Json, 2),
+            ("\u{2028}@", InputMode::Json5, 3),
+            ("\u{2029}@", InputMode::Json5, 3),
+        ] {
+            let (_, diagnostics) = lex_with_mode(source, mode);
+            let start = diagnostics[0].span.unwrap().start;
+
+            assert_eq!(
+                start,
+                Position::new(byte, 2, 1),
+                "wrong position for {source:?}"
+            );
+        }
+    }
+    #[test]
+    fn caps_diagnostics_for_hostile_input() {
+        let source = "@".repeat(MAX_DIAGNOSTICS + 10);
+        let (_, diagnostics) = lex(&source);
+        assert_eq!(diagnostics.len(), MAX_DIAGNOSTICS + 1);
+        assert_eq!(
+            diagnostics.last().unwrap().kind,
+            DiagnosticKind::TooManyErrors {
+                max_errors: MAX_DIAGNOSTICS
+            }
+        );
+    }
+
+    #[test]
+    fn caps_tokens_for_hostile_input() {
+        let source = "[".repeat(MAX_TOKENS + 1);
+        let (_, diagnostics) = lex(&source);
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.kind
+            == DiagnosticKind::TooManyTokens {
+                max_tokens: MAX_TOKENS
+            }));
+    }
+
+    #[test]
+    fn json5_uses_its_own_whitespace_table() {
+        assert!(lex_with_mode("\u{feff}{}", InputMode::Json5).1.is_empty());
+        assert!(lex_with_mode("\u{0085}{}", InputMode::Json5)
+            .1
+            .iter()
+            .any(|diagnostic| diagnostic.kind == DiagnosticKind::InvalidCharacter('\u{0085}')));
+    }
+
+    #[test]
+    fn json5_line_comments_end_at_unicode_line_terminators() {
+        for terminator in ['\u{2028}', '\u{2029}'] {
+            let source = format!("// comment{terminator}{{}}");
+            let (tokens, diagnostics) = lex_with_mode(&source, InputMode::Json5);
+            assert!(diagnostics.is_empty());
+            assert!(tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::LeftBrace));
+        }
+    }
+
+    #[test]
+    fn json5_supports_unicode_line_continuations() {
+        for terminator in ['\u{2028}', '\u{2029}'] {
+            let source = format!("'a\\{terminator}b'");
+            let (tokens, diagnostics) = lex_with_mode(&source, InputMode::Json5);
+            assert!(diagnostics.is_empty());
+            assert!(tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::String("ab".into())));
+        }
+    }
+
+    #[test]
+    fn string_errors_do_not_cascade_and_point_at_the_bad_character() {
+        let (_, unicode_diagnostics) = lex(r#""\u12x""#);
+        assert_eq!(unicode_diagnostics.len(), 1);
+        assert_eq!(
+            unicode_diagnostics[0].kind,
+            DiagnosticKind::InvalidUnicodeEscape
+        );
+
+        let (_, control_diagnostics) = lex("\"before\tafter\"");
+        let span = control_diagnostics[0].span.unwrap();
+        assert_eq!(span.start.column, 8);
+        assert_eq!(span.end.column, 9);
+    }
+    #[test]
+    fn strict_keywords_require_an_identifier_boundary() {
+        let (tokens, diagnostics) = lex("truefalse");
+
+        assert!(!diagnostics.is_empty());
+        assert!(!tokens
+            .iter()
+            .any(|token| matches!(token.kind, TokenKind::True | TokenKind::False)));
     }
 }

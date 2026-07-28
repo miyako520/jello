@@ -1,9 +1,9 @@
 [package]
-name = "jqr"
+name = "jello"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.73"
-description = "A small handwritten JSON formatter, fixer, and reporter."
+description = "A handwritten JSON formatter, validator, and conservative repair CLI."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/miyako520/jello"
@@ -13,9 +13,9 @@ categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.github/"]
 
 [lib]
-name = "jqr"
+name = "jello"
 path = "src/lib.rs"
 
 [[bin]]
-name = "jqr"
+name = "jello"
 path = "src/main.rs"

@@ -11,7 +11,7 @@ pub struct Stats {
 }
 
 impl Stats {
-    pub fn from_value(value: &Value, original_size: usize, formatted_size: usize) -> Self {
+    pub(crate) fn from_value(value: &Value, original_size: usize, formatted_size: usize) -> Self {
         let mut stats = Self {
             key_count: 0,
             max_depth: 0,
@@ -51,7 +51,7 @@ impl Stats {
             let width = if count == 0 || largest == 0 {
                 0
             } else {
-                (count * 24).div_ceil(largest)
+                ((count as u128 * 24).div_ceil(largest as u128)) as usize
             };
             output.push_str(&format!(
                 "\n  {:<4} | {:<24} {}",
@@ -157,5 +157,17 @@ mod tests {
         assert!(rendered.contains("1-4  | ######################## 2"));
         assert!(rendered.contains("5-8  | ############             1"));
         assert!(rendered.contains("33+  |                          0"));
+    }
+    #[test]
+    fn rendering_public_stats_cannot_overflow() {
+        let stats = Stats {
+            key_count: 0,
+            max_depth: 0,
+            leaf_count: 0,
+            original_size: 0,
+            formatted_size: 0,
+            string_lengths: [usize::MAX, 0, 0, 0, 0, 0],
+        };
+        assert!(stats.render(true, 0).contains(&"#".repeat(24)));
     }
 }

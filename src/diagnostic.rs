@@ -54,9 +54,11 @@ pub fn color_enabled(choice: ColorChoice, is_terminal: bool, no_color: bool) -> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticKind {
     EmptyInput,
-    InvalidArgument(String),
+    InvalidArgument { en: Box<str>, zh: Box<str> },
     Io(String),
+    InvalidUtf8,
     InvalidCharacter(char),
+    UnescapedControlCharacter(char),
     UnterminatedString,
     InvalidEscape(char),
     InvalidUnicodeEscape,
@@ -64,6 +66,11 @@ pub enum DiagnosticKind {
     UnterminatedBlockComment,
     NonFiniteNumber,
     InputTooLarge { max_bytes: usize },
+    OutputTooLarge { max_bytes: usize },
+    TooManyErrors { max_errors: usize },
+    TooManyTokens { max_tokens: usize },
+    TooManyRepairs { max_repairs: usize },
+    AllocationFailed,
     NestingTooDeep { max_depth: usize },
     Expected(String),
     UnexpectedToken(String),
@@ -86,15 +93,25 @@ impl Diagnostic {
         match (&self.kind, lang) {
             (DiagnosticKind::EmptyInput, Language::En) => "input is empty".to_string(),
             (DiagnosticKind::EmptyInput, Language::Zh) => "输入为空".to_string(),
-            (DiagnosticKind::InvalidArgument(msg), Language::En) => msg.clone(),
-            (DiagnosticKind::InvalidArgument(msg), Language::Zh) => format!("参数错误：{}", msg),
+            (DiagnosticKind::InvalidArgument { en, .. }, Language::En) => en.to_string(),
+            (DiagnosticKind::InvalidArgument { zh, .. }, Language::Zh) => {
+                format!("参数错误：{}", zh)
+            }
             (DiagnosticKind::Io(msg), Language::En) => format!("I/O error: {}", msg),
             (DiagnosticKind::Io(msg), Language::Zh) => format!("I/O 错误：{}", msg),
+            (DiagnosticKind::InvalidUtf8, Language::En) => "input is not valid UTF-8".to_string(),
+            (DiagnosticKind::InvalidUtf8, Language::Zh) => "输入不是有效的 UTF-8".to_string(),
             (DiagnosticKind::InvalidCharacter(ch), Language::En) => {
                 format!("invalid character `{}`", ch)
             }
             (DiagnosticKind::InvalidCharacter(ch), Language::Zh) => {
                 format!("非法字符 `{}`", ch)
+            }
+            (DiagnosticKind::UnescapedControlCharacter(ch), Language::En) => {
+                format!("unescaped control character U+{:04X}", *ch as u32)
+            }
+            (DiagnosticKind::UnescapedControlCharacter(ch), Language::Zh) => {
+                format!("未转义的控制字符 U+{:04X}", *ch as u32)
             }
             (DiagnosticKind::UnterminatedString, Language::En) => {
                 "unterminated string literal".to_string()
@@ -131,6 +148,34 @@ impl Diagnostic {
             (DiagnosticKind::InputTooLarge { max_bytes }, Language::Zh) => {
                 format!("输入超过 {} 字节限制", max_bytes)
             }
+            (DiagnosticKind::OutputTooLarge { max_bytes }, Language::En) => {
+                format!("formatted output exceeds the {} byte limit", max_bytes)
+            }
+            (DiagnosticKind::OutputTooLarge { max_bytes }, Language::Zh) => {
+                format!("格式化输出超过 {} 字节限制", max_bytes)
+            }
+            (DiagnosticKind::TooManyErrors { max_errors }, Language::En) => {
+                format!("too many errors; stopped after {}", max_errors)
+            }
+            (DiagnosticKind::TooManyErrors { max_errors }, Language::Zh) => {
+                format!("错误过多；已在 {} 个错误后停止", max_errors)
+            }
+            (DiagnosticKind::TooManyTokens { max_tokens }, Language::En) => {
+                format!("input exceeds the {} token limit", max_tokens)
+            }
+            (DiagnosticKind::TooManyTokens { max_tokens }, Language::Zh) => {
+                format!("输入超过 {} 个 token 的限制", max_tokens)
+            }
+            (DiagnosticKind::TooManyRepairs { max_repairs }, Language::En) => {
+                format!("repair requires more than {} edits", max_repairs)
+            }
+            (DiagnosticKind::TooManyRepairs { max_repairs }, Language::Zh) => {
+                format!("修复需要超过 {} 项编辑", max_repairs)
+            }
+            (DiagnosticKind::AllocationFailed, Language::En) => {
+                "unable to allocate memory for the operation".to_string()
+            }
+            (DiagnosticKind::AllocationFailed, Language::Zh) => "无法为操作分配内存".to_string(),
             (DiagnosticKind::NestingTooDeep { max_depth }, Language::En) => {
                 format!("JSON nesting exceeds the {} level limit", max_depth)
             }
@@ -173,7 +218,7 @@ pub fn render_diagnostic(
     };
 
     let line_number = span.start.line.max(1);
-    let lines: Vec<&str> = source.lines().collect();
+    let lines = source_lines(source);
     let gutter_width = line_number.max(lines.len()).to_string().len();
     let arrow = style("-->", "34", color);
     out.push_str(&format!(
@@ -229,6 +274,28 @@ pub fn render_diagnostic(
     out
 }
 
+fn source_lines(source: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = source.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        if !matches!(ch, '\r' | '\n' | '\u{2028}' | '\u{2029}') {
+            continue;
+        }
+        lines.push(&source[start..index]);
+        start = index + ch.len_utf8();
+        if ch == '\r' {
+            if let Some(&(next_index, '\n')) = chars.peek() {
+                chars.next();
+                start = next_index + 1;
+            }
+        }
+    }
+    lines.push(&source[start..]);
+    lines
+}
+
 fn style(text: &str, ansi_code: &str, enabled: bool) -> String {
     if enabled {
         format!("\u{1b}[{}m{}\u{1b}[0m", ansi_code, text)
@@ -270,6 +337,24 @@ mod tests {
     }
 
     #[test]
+    fn renders_invalid_utf8_in_both_languages() {
+        let diag = Diagnostic::new("E015", DiagnosticKind::InvalidUtf8, None);
+
+        assert!(diag.message(Language::En).contains("valid UTF-8"));
+        assert!(diag.message(Language::Zh).contains("UTF-8"));
+    }
+
+    #[test]
+    fn renders_chinese_control_character() {
+        let diag = Diagnostic::new(
+            "E002",
+            DiagnosticKind::UnescapedControlCharacter('\n'),
+            None,
+        );
+        assert_eq!(diag.message(Language::Zh), "未转义的控制字符 U+000A");
+    }
+
+    #[test]
     fn renders_ansi_color_when_enabled() {
         let span = Span::new(Position::new(0, 1, 1), Position::new(1, 1, 2));
         let diag = Diagnostic::new("E001", DiagnosticKind::InvalidCharacter('x'), Some(span));
@@ -288,5 +373,30 @@ mod tests {
         assert!(color_enabled(ColorChoice::Always, false, false));
         assert!(!color_enabled(ColorChoice::Always, true, true));
         assert!(!color_enabled(ColorChoice::Never, true, false));
+    }
+
+    #[test]
+    fn renders_source_context_after_lone_carriage_return() {
+        let source = "first\rbad";
+        let span = Span::new(Position::new(6, 2, 1), Position::new(7, 2, 2));
+        let diag = Diagnostic::new("E001", DiagnosticKind::InvalidCharacter('b'), Some(span));
+
+        let rendered = render_diagnostic(&diag, source, "input.json", Language::En, false);
+
+        assert!(rendered.contains("1 | first"));
+        assert!(rendered.contains("2 | bad"));
+        assert!(rendered.contains("--> input.json:2:1"));
+    }
+    #[test]
+    fn renders_eof_on_the_empty_line_after_a_trailing_newline() {
+        let position = crate::span::Position::new(4, 2, 1);
+        let diagnostic = Diagnostic::new(
+            "E006",
+            DiagnosticKind::Expected("value".into()),
+            Some(Span::new(position, position)),
+        );
+        let rendered = render_diagnostic(&diagnostic, "[1,\n", "<stdin>", Language::En, false);
+        assert!(rendered.contains("2 | \n"));
+        assert!(rendered.contains("| ^\n"));
     }
 }

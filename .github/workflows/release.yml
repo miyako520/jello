@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +16,8 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - name: Install stable Rust
@@ -22,21 +25,30 @@ jobs:
           rustup update stable
           rustup default stable
           rustup component add rustfmt clippy
-      - name: Verify tag matches Cargo version
+      - name: Read and verify Cargo version
+        id: metadata
         shell: bash
         run: |
-          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
-          test "v${version}" = "${GITHUB_REF_NAME}"
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            test "v${version}" = "${GITHUB_REF_NAME}"
+          fi
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --all-targets --locked
+      - name: Verify Cargo package
+        run: cargo package --locked
 
   linux:
     needs: verify
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - name: Install stable Rust
@@ -48,23 +60,25 @@ jobs:
         run: |
           rustup target add x86_64-unknown-linux-gnu
           cargo build --release --locked --target x86_64-unknown-linux-gnu
+          ./target/x86_64-unknown-linux-gnu/release/jello --version
       - name: Package Linux archive
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          package="jqr-${version}-x86_64-unknown-linux-gnu"
+          package="jello-${VERSION}-x86_64-unknown-linux-gnu"
           mkdir "${package}"
-          cp target/x86_64-unknown-linux-gnu/release/jqr README.md LICENSE CHANGELOG.md "${package}/"
+          cp target/x86_64-unknown-linux-gnu/release/jello README.md LICENSE CHANGELOG.md "${package}/"
           tar -czf "${package}.tar.gz" "${package}"
       - uses: actions/upload-artifact@v7
         with:
           name: release-linux
-          path: jqr-*.tar.gz
+          path: jello-*.tar.gz
           if-no-files-found: error
 
   windows:
     needs: verify
     runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - name: Install stable Rust
@@ -77,23 +91,25 @@ jobs:
         run: |
           rustup target add x86_64-pc-windows-msvc
           cargo build --release --locked --target x86_64-pc-windows-msvc
+          ./target/x86_64-pc-windows-msvc/release/jello.exe --version
       - name: Package Windows archive
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $package = "jqr-$version-x86_64-pc-windows-msvc"
+          $package = "jello-$env:VERSION-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Path $package
-          Copy-Item target/x86_64-pc-windows-msvc/release/jqr.exe, README.md, LICENSE, CHANGELOG.md -Destination $package
+          Copy-Item target/x86_64-pc-windows-msvc/release/jello.exe, README.md, LICENSE, CHANGELOG.md -Destination $package
           Compress-Archive -Path $package -DestinationPath "$package.zip"
       - uses: actions/upload-artifact@v7
         with:
           name: release-windows
-          path: jqr-*.zip
+          path: jello-*.zip
           if-no-files-found: error
 
   macos:
     needs: verify
     runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - name: Install stable Rust
@@ -109,23 +125,24 @@ jobs:
       - name: Package universal macOS archive
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          package="jqr-${version}-universal-apple-darwin"
+          package="jello-${VERSION}-universal-apple-darwin"
           mkdir "${package}"
           lipo -create \
-            target/x86_64-apple-darwin/release/jqr \
-            target/aarch64-apple-darwin/release/jqr \
-            -output "${package}/jqr"
-          chmod +x "${package}/jqr"
+            target/x86_64-apple-darwin/release/jello \
+            target/aarch64-apple-darwin/release/jello \
+            -output "${package}/jello"
+          chmod +x "${package}/jello"
+          "${package}/jello" --version
           cp README.md LICENSE CHANGELOG.md "${package}/"
           tar -czf "${package}.tar.gz" "${package}"
       - uses: actions/upload-artifact@v7
         with:
           name: release-macos
-          path: jqr-*.tar.gz
+          path: jello-*.tar.gz
           if-no-files-found: error
 
   publish:
+    if: github.event_name == 'push'
     needs:
       - linux
       - windows

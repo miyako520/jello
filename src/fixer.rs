@@ -1,335 +1,262 @@
+use crate::ast::Value;
+use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::formatter::{format_json, FormatError};
+use crate::lexer::InputMode;
+use crate::parser::{parse_repair, parse_with_mode};
+use crate::span::Position;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixEdit {
-    pub position: usize,
+    pub byte: usize,
+    pub line: usize,
+    pub column: usize,
+    pub code: &'static str,
     pub description: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FixResult {
+impl FixEdit {
+    pub(crate) fn at(code: &'static str, description: &str, position: Position) -> Self {
+        Self {
+            byte: position.byte,
+            line: position.line,
+            column: position.column,
+            code,
+            description: description.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FixResult {
+    pub(crate) value: Value,
     pub output: String,
     pub edits: Vec<FixEdit>,
 }
 
-pub fn fix(source: &str) -> FixResult {
-    let mut edits = Vec::new();
-    let after_strings = convert_single_quoted_strings(source, &mut edits);
-    let after_commas = insert_missing_commas(&after_strings, &mut edits);
-    let after_keys = quote_unquoted_keys(&after_commas, &mut edits);
-    let output = remove_trailing_commas(&after_keys, &mut edits);
-    FixResult { output, edits }
-}
-
-fn convert_single_quoted_strings(source: &str, edits: &mut Vec<FixEdit>) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    let mut in_double = false;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if ch == '"' && !is_escaped(&chars, i) {
-            in_double = !in_double;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-
-        if ch == '\'' && !in_double {
-            edits.push(FixEdit {
-                position: i,
-                description: "converted single-quoted string".to_string(),
-            });
-            out.push('"');
-            i += 1;
-            while i < chars.len() {
-                let inner = chars[i];
-                if inner == '\'' && !is_escaped(&chars, i) {
-                    out.push('"');
-                    i += 1;
-                    break;
-                }
-                if inner == '"' {
-                    out.push_str("\\\"");
-                } else {
-                    out.push(inner);
-                }
-                i += 1;
-            }
-            continue;
-        }
-
-        out.push(ch);
-        i += 1;
-    }
-
-    out
-}
-
-fn quote_unquoted_keys(source: &str, edits: &mut Vec<FixEdit>) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    let mut in_string = false;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if ch == '"' && !is_escaped(&chars, i) {
-            in_string = !in_string;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-
-        if !in_string && (ch == '{' || ch == ',') {
-            out.push(ch);
-            i += 1;
-            while i < chars.len() && chars[i].is_whitespace() {
-                out.push(chars[i]);
-                i += 1;
-            }
-
-            if i < chars.len() && is_ident_start(chars[i]) {
-                let start = i;
-                let mut end = i + 1;
-                while end < chars.len() && is_ident_continue(chars[end]) {
-                    end += 1;
-                }
-                let mut probe = end;
-                while probe < chars.len() && chars[probe].is_whitespace() {
-                    probe += 1;
-                }
-                if probe < chars.len() && chars[probe] == ':' {
-                    edits.push(FixEdit {
-                        position: start,
-                        description: "quoted unquoted object key".to_string(),
-                    });
-                    out.push('"');
-                    for key_ch in &chars[start..end] {
-                        out.push(*key_ch);
-                    }
-                    out.push('"');
-                    i = end;
-                    continue;
-                }
-            }
-            continue;
-        }
-
-        out.push(ch);
-        i += 1;
-    }
-
-    out
-}
-
-fn remove_trailing_commas(source: &str, edits: &mut Vec<FixEdit>) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    let mut in_string = false;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if ch == '"' && !is_escaped(&chars, i) {
-            in_string = !in_string;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-
-        if !in_string && ch == ',' {
-            let mut probe = i + 1;
-            while probe < chars.len() && chars[probe].is_whitespace() {
-                probe += 1;
-            }
-            if probe < chars.len() && (chars[probe] == '}' || chars[probe] == ']') {
-                edits.push(FixEdit {
-                    position: i,
-                    description: "removed trailing comma".to_string(),
-                });
-                i += 1;
-                continue;
-            }
-        }
-
-        out.push(ch);
-        i += 1;
-    }
-
-    out
-}
-
-fn insert_missing_commas(source: &str, edits: &mut Vec<FixEdit>) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let start = i;
-        if chars[i] == '"' {
-            out.push(chars[i]);
-            i += 1;
-            while i < chars.len() {
-                let ch = chars[i];
-                out.push(ch);
-                i += 1;
-                if ch == '"' && !is_escaped(&chars, i - 1) {
-                    break;
-                }
-            }
-            maybe_insert_comma(&chars, i, start, edits, &mut out);
-            continue;
-        }
-
-        if is_number_start(chars[i]) {
-            out.push(chars[i]);
-            i += 1;
-            while i < chars.len() && is_number_continue(chars[i]) {
-                out.push(chars[i]);
-                i += 1;
-            }
-            maybe_insert_comma(&chars, i, start, edits, &mut out);
-            continue;
-        }
-
-        if starts_with_word(&chars, i, "true")
-            || starts_with_word(&chars, i, "false")
-            || starts_with_word(&chars, i, "null")
-        {
-            let word_len = if starts_with_word(&chars, i, "true") {
-                4
-            } else if starts_with_word(&chars, i, "false") {
-                5
-            } else {
-                4
-            };
-            for _ in 0..word_len {
-                out.push(chars[i]);
-                i += 1;
-            }
-            maybe_insert_comma(&chars, i, start, edits, &mut out);
-            continue;
-        }
-
-        out.push(chars[i]);
-        i += 1;
-        if matches!(chars[start], '}' | ']') {
-            maybe_insert_comma(&chars, i, start, edits, &mut out);
-        }
-    }
-
-    out
-}
-
-fn maybe_insert_comma(
-    chars: &[char],
-    index: usize,
-    position: usize,
-    edits: &mut Vec<FixEdit>,
-    out: &mut String,
-) {
-    let mut probe = index;
-    while probe < chars.len() && chars[probe].is_whitespace() {
-        probe += 1;
-    }
-
-    if probe >= chars.len() {
-        return;
-    }
-
-    let next = chars[probe];
-    if next == ':' || next == ',' || next == '}' || next == ']' {
-        return;
-    }
-
-    if is_value_start(next) {
-        edits.push(FixEdit {
-            position,
-            description: "inserted missing comma".to_string(),
+pub(crate) fn fix(source: &str, mode: InputMode) -> Result<FixResult, Vec<Diagnostic>> {
+    if let Some(value) = parse_without_repairs(source, mode) {
+        let output = format_json(&value).map_err(format_diagnostic)?;
+        return Ok(FixResult {
+            value,
+            output,
+            edits: Vec::new(),
         });
-        out.push(',');
     }
+
+    let (value, edits) = parse_repair(source, mode)?;
+    let output = format_json(&value).map_err(format_diagnostic)?;
+    Ok(FixResult {
+        value,
+        output,
+        edits,
+    })
 }
 
-fn is_escaped(chars: &[char], index: usize) -> bool {
-    let mut count = 0;
-    let mut i = index;
-    while i > 0 {
-        i -= 1;
-        if chars[i] == '\\' {
-            count += 1;
-        } else {
-            break;
+fn parse_without_repairs(source: &str, mode: InputMode) -> Option<Value> {
+    if mode != InputMode::Json {
+        return None;
+    }
+    parse_with_mode(source, mode).ok()
+}
+
+fn format_diagnostic(error: FormatError) -> Vec<Diagnostic> {
+    let (code, kind) = match error {
+        FormatError::OutputTooLarge { max_bytes } => {
+            ("E019", DiagnosticKind::OutputTooLarge { max_bytes })
         }
-    }
-    count % 2 == 1
+        FormatError::AllocationFailed => ("E020", DiagnosticKind::AllocationFailed),
+    };
+    vec![Diagnostic::new(code, kind, None)]
 }
-
-fn is_ident_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
-}
-
-fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || ch == '-' || ch.is_ascii_alphanumeric()
-}
-
-fn is_number_start(ch: char) -> bool {
-    ch == '-' || ch.is_ascii_digit()
-}
-
-fn is_number_continue(ch: char) -> bool {
-    ch.is_ascii_digit() || matches!(ch, '.' | 'e' | 'E' | '+' | '-')
-}
-
-fn is_value_start(ch: char) -> bool {
-    matches!(ch, '"' | '{' | '[' | '-' | '0'..='9' | 't' | 'f' | 'n') || is_ident_start(ch)
-}
-
-fn starts_with_word(chars: &[char], index: usize, word: &str) -> bool {
-    for (offset, expected) in word.chars().enumerate() {
-        if chars.get(index + offset) != Some(&expected) {
-            return false;
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
+
+    fn fix_json5(source: &str) -> Result<FixResult, Vec<Diagnostic>> {
+        fix(source, InputMode::Json5)
+    }
+
+    fn assert_round_trip(result: &FixResult) -> Value {
+        crate::parser::parse(&result.output).expect("repaired output must be strict JSON")
+    }
 
     #[test]
     fn converts_single_quoted_strings() {
-        let fixed = fix("{'name':'Ada'}");
+        let fixed = fix_json5("{'name':'Ada'}").unwrap();
 
-        assert_eq!(fixed.output, "{\"name\":\"Ada\"}");
+        assert_round_trip(&fixed);
+        assert_eq!(
+            fixed
+                .edits
+                .iter()
+                .filter(|edit| edit.code == "F001")
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn quotes_unquoted_keys() {
-        let fixed = fix("{name:\"Ada\"}");
+        let fixed = fix_json5("{name:\"Ada\"}").unwrap();
 
-        assert_eq!(fixed.output, "{\"name\":\"Ada\"}");
+        assert_round_trip(&fixed);
+        assert!(fixed.edits.iter().any(|edit| edit.code == "F002"));
     }
 
     #[test]
     fn removes_trailing_commas() {
-        let fixed = fix("{\"a\":1,}");
+        let fixed = fix_json5("{\"a\":1,}").unwrap();
 
-        assert_eq!(fixed.output, "{\"a\":1}");
+        assert_round_trip(&fixed);
+        assert!(fixed.edits.iter().any(|edit| edit.code == "F003"));
     }
 
     #[test]
     fn inserts_missing_commas() {
-        let fixed = fix("[1 2 true]");
+        let fixed = fix_json5("[1 2 true]").unwrap();
 
-        assert_eq!(fixed.output, "[1, 2, true]");
+        assert_round_trip(&fixed);
+        assert_eq!(
+            fixed
+                .edits
+                .iter()
+                .filter(|edit| edit.code == "F004")
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn combines_missing_comma_and_unquoted_key_repairs() {
-        let fixed = fix("{a:1 b:2}");
+        let fixed = fix_json5("{a:1 b:2}").unwrap();
 
-        assert_eq!(fixed.output, "{\"a\":1, \"b\":2}");
+        assert_round_trip(&fixed);
+        assert_eq!(
+            fixed
+                .edits
+                .iter()
+                .filter(|edit| edit.code == "F002")
+                .count(),
+            2
+        );
+        assert!(fixed.edits.iter().any(|edit| edit.code == "F004"));
+    }
+
+    #[test]
+    fn repairs_escaped_apostrophe_without_creating_invalid_json_escape() {
+        let fixed = fix_json5("{message: 'it\\'s'}").unwrap();
+
+        let parsed = assert_round_trip(&fixed);
+        assert_eq!(
+            parsed,
+            Value::Object(vec![("message".into(), Value::String("it's".into()),)])
+        );
+        assert!(fixed.edits.iter().any(|edit| edit.code == "F001"));
+        assert!(fixed.edits.iter().any(|edit| edit.code == "F002"));
+    }
+
+    #[test]
+    fn does_not_quote_identifiers_in_array_value_position() {
+        let errors = fix_json5("[a:1]").unwrap_err();
+
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn repairs_missing_commas_in_nested_containers() {
+        let fixed = fix_json5(r#"{"a":[1 2],"b":{"c":true "d":null}}"#).unwrap();
+
+        assert_round_trip(&fixed);
+        assert_eq!(
+            fixed
+                .edits
+                .iter()
+                .filter(|edit| edit.code == "F004")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn repairs_trailing_commas_with_source_positions() {
+        let fixed = fix_json5("{\n  a: [1,],\n}").unwrap();
+
+        assert_round_trip(&fixed);
+        assert!(fixed
+            .edits
+            .iter()
+            .any(|edit| edit.code == "F003" && edit.line == 2 && edit.column > 1));
+    }
+
+    #[test]
+    fn missing_colon_is_unrepairable() {
+        let errors = fix_json5(r#"{"a" 1}"#).unwrap_err();
+
+        assert!(errors.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.kind,
+                crate::diagnostic::DiagnosticKind::Expected(_)
+            )
+        }));
+    }
+    #[test]
+    fn strict_fix_does_not_implicitly_accept_json5_lexical_syntax() {
+        assert!(fix("{a: 0x10}", InputMode::Json).is_err());
+    }
+
+    #[test]
+    fn json5_fix_audits_normalization_alongside_other_repairs() {
+        let fixed = fix("{a:/* comment */0x10}", InputMode::Json5).unwrap();
+        assert!(fixed.edits.iter().any(|edit| edit.code == "F002"));
+        assert!(
+            fixed
+                .edits
+                .iter()
+                .filter(|edit| edit.code == "F005")
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn json5_fix_audits_non_json_whitespace() {
+        let fixed = fix_json5("{\u{00a0}\"a\":1}").unwrap();
+
+        assert!(fixed
+            .edits
+            .iter()
+            .any(|edit| { edit.code == "F005" && edit.description.contains("whitespace") }));
+    }
+
+    #[test]
+    fn json5_fix_audits_escaped_apostrophe_in_double_quoted_string() {
+        let fixed = fix_json5(r#"{"a":"it\'s"}"#).unwrap();
+
+        assert!(fixed
+            .edits
+            .iter()
+            .any(|edit| { edit.code == "F005" && edit.description.contains("escape") }));
+    }
+    #[test]
+    fn missing_comma_repair_rejects_adjacent_tokens_without_trivia() {
+        for source in ["[truefalse]", "[1-2]"] {
+            assert!(fix(source, InputMode::Json).is_err(), "{source}");
+        }
+        for source in ["[1.2.3]", "[1+2]", "{a:1b:2}"] {
+            assert!(fix(source, InputMode::Json5).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn missing_comma_repair_accepts_tokens_separated_by_trivia() {
+        for (source, mode) in [
+            ("[1 2]", InputMode::Json),
+            ("[1 /* comment */ 2]", InputMode::Json5),
+            ("{a:1 b:2}", InputMode::Json5),
+        ] {
+            let fixed = fix(source, mode).unwrap();
+            assert!(fixed.edits.iter().any(|edit| edit.code == "F004"));
+        }
     }
 }

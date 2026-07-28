@@ -1,8 +1,10 @@
-# jqr
+# jello
 
-`jqr` is a small Rust JSON formatter and repair-oriented parser experiment. It uses a handwritten lexer and recursive descent parser so diagnostics and repair behavior stay under project control.
+`jello` is a small, handwritten JSON formatter, validator, and conservative
+repair tool. It keeps parsing, diagnostics, and repair decisions under project
+control instead of delegating them to a general-purpose JSON library.
 
-The executable and Rust package are named `jqr`; the source repository is hosted as [`miyako520/jello`](https://github.com/miyako520/jello).
+Older unpublished revisions used the working name `jqr`.
 
 ## Installation
 
@@ -12,92 +14,163 @@ Install the latest source revision with Rust 1.73 or newer:
 cargo install --git https://github.com/miyako520/jello --locked
 ```
 
-After a version is tagged, prebuilt Linux, macOS, and Windows archives and `SHA256SUMS` are published on the [GitHub Releases page](https://github.com/miyako520/jello/releases). Verify the archive checksum before placing `jqr` or `jqr.exe` on your `PATH`.
+The project is not yet published to crates.io or Homebrew. Tagged releases
+publish Linux, macOS, and Windows archives plus `SHA256SUMS` on the
+[GitHub Releases page](https://github.com/miyako520/jello/releases).
 
-The project is not yet published to crates.io or Homebrew, so `cargo install jqr` and `brew install jqr` are not supported installation paths yet.
+## Quick start
 
-## Quick Start
-
-```powershell
-'{"name":"Ada","items":[1,true,null]}' | cargo run --
-```
-
-Pass a file path or pipe JSON through stdin:
+Format stdin or a file:
 
 ```powershell
-Get-Content data.json | cargo run --
-cargo run -- --fix --stats --lang zh data.json
-cargo run -- --json5 --color always config.json5
+'{"name":"Ada","items":[1,true,null]}' | jello
+jello data.json
 ```
 
-## Features
-
-- Pretty-print standard JSON with two-space indentation.
-- `--fix` repairs common mistakes before parsing:
-  - single-quoted strings;
-  - unquoted object keys;
-  - trailing commas;
-  - obvious missing commas between adjacent values.
-- `--stats` prints key count, max depth, leaf count, size ratio, validity, and fix count to stderr.
-- `--stats` also renders a fixed-width histogram of object-key and string-value lengths.
-- `--json5` accepts comments, single-quoted strings, unquoted keys, trailing commas, hexadecimal numbers, leading `+`, `.5`, `5.`, and string line continuations. Output is always standard JSON.
-- `Infinity` and `NaN` are rejected because they cannot be converted to standard JSON without changing their meaning.
-- `--lang zh` and `--lang en` switch diagnostic text.
-- Diagnostics use Rust compiler-style source context and arrows.
-- `--color auto|always|never` controls ANSI color. `NO_COLOR` always disables color.
-
-## Limits
-
-- Inputs are limited to 16 MiB from files, stdin, and the parser library API.
-- Arrays and objects may be nested up to 256 levels.
-- JSON5 `Infinity` and `NaN` are rejected because standard JSON cannot represent them without changing their meaning.
-
-## Examples
-
-English:
+Check formatting without printing JSON:
 
 ```powershell
-cargo run -- --fix broken.json
-cargo run -- --json5 --stats config.json5
+jello --check data.json
 ```
 
-中文：
+Replace a checked regular file only after successful parsing and formatting:
 
 ```powershell
-cargo run -- --fix --stats --lang zh broken.json
-cargo run -- --json5 --lang zh --color always config.json5
+jello --write data.json
 ```
 
-JSON5 input:
-
-```json5
-// config.json5
-{
-  appName: 'jqr',
-  ports: [0x1f90, 8081,],
-  ratio: +.5,
-}
-```
-
-The command below prints strict, pretty-formatted JSON to stdout and statistics to stderr:
+Repair supported mistakes and print the result:
 
 ```powershell
-cargo run -- --json5 --stats config.json5
+jello --fix broken.json
+jello --fix --write broken.json
 ```
 
-## Roadmap
+## Command-line options
 
-- Add more parser recovery paths.
-- Add JSON Schema validation.
+```text
+jello [OPTIONS] [--] [path]
+
+--fix                  Repair supported mistakes before formatting
+--stats                Print structural statistics to stderr
+--check                Exit 1 when input is not already formatted
+--write, -i            Replace a checked regular input file
+--json5                Accept the documented JSON5 subset
+--indent <0..16>       Pretty-print indentation width (default: 2)
+--compact              Emit compact JSON
+--lang <zh|en>         Diagnostic language
+--color <MODE>         auto, always, or never
+--version, -V          Print version
+--help, -h             Print help
+```
+
+Use `--` before a path beginning with a hyphen. `--check` and `--write` are
+mutually exclusive, as are `--compact` and `--indent`.
+
+Exit codes:
+
+- `0`: success;
+- `1`: invalid content or a failed formatting check;
+- `2`: invalid arguments or an I/O failure.
+
+## Strict JSON behavior
+
+Strict mode follows RFC 8259:
+
+- only space, tab, carriage return, and line feed are accepted as whitespace;
+- unescaped U+0000 through U+001F characters are rejected inside strings;
+- valid UTF-16 surrogate pairs in `\uXXXX\uXXXX` escapes are decoded;
+- lone surrogates and invalid JSON number forms are rejected.
+
+Inputs are limited to 16 MiB, 250,000 tokens, and 256 nested arrays/objects.
+At most 64 ordinary lexer diagnostics and 10,000 repair edits are retained.
+Formatted output is limited to 64 MiB. Formatter output growth and the largest
+lexer/parser buffers use fallible reservation; allocation failures in other
+Rust or platform-library paths are not guaranteed to be recoverable.
+
+## Repair safety
+
+Without `--json5`, `--fix` only repairs structural mistakes: trailing commas
+and missing commas between complete sibling values when actual whitespace or
+JSON5 comment trivia separates them. JSON5 lexical syntax such as comments,
+single-quoted strings, unquoted keys, hexadecimal numbers, and leading `+`
+requires `--fix --json5`.
+
+Repairs are decided from lexer tokens and parser container context, not global
+text replacement. Every structural repair and JSON5 normalization is reported
+to stderr with a rule code, byte offset, line, and column. Output is returned
+only when the repaired document can be represented as strict JSON. `--fix`
+never changes a file unless `--write` is also supplied.
+
+`--write` refuses symbolic links and files with multiple hard links on Unix and
+Windows. It snapshots file identity and metadata, rereads the content while
+preparing output, and checks it again immediately before replacement. These
+checks narrow concurrent-update races but are not an atomic compare-and-replace
+operation. Replacement deliberately has directory-entry replacement semantics:
+it uses a sibling temporary file and preserves ordinary permissions, but does
+not preserve every platform ACL, extended attribute, alternate data stream,
+owner, or timestamp.
+
+## Supported JSON5 subset
+
+`--json5` accepts comments, single-quoted strings, unquoted identifier keys,
+trailing commas, hexadecimal integers up to `u128`, leading `+`, `.5`, `5.`,
+and string line continuations. Output is always strict JSON.
+
+This is intentionally described as a subset. Full ECMAScript identifier and
+escape syntax is not yet implemented. `Infinity` and `NaN` are rejected
+because standard JSON cannot represent them without changing their meaning.
+
+## Formatting and statistics
+
+Pretty output uses two spaces by default. Use `--indent 0` through
+`--indent 16`, or `--compact` for no insignificant whitespace.
+
+`--stats` writes key count, maximum depth, leaf count, size ratio, validity,
+repair count, and a string-length histogram to stderr so stdout remains
+pipe-friendly.
+
+## Rust library
+
+The crate exposes an opaque `Document` so callers cannot construct invalid
+JSON number strings:
+
+```rust
+use jello::{format, parse, FormatOptions};
+
+let document = parse(r#"{"name":"Ada"}"#)?;
+let output = format(&document, FormatOptions::compact()).expect("output is bounded");
+assert_eq!(output, r#"{"name":"Ada"}"#);
+# Ok::<(), Vec<jello::Diagnostic>>(())
+```
+
+The public API also provides `parse_json5`, `repair`, `repair_json5`, and
+`statistics`. Formatting is fallible so callers can handle the output-size and
+allocation limits.
+`repair` returns `RepairOutcome::Valid` when no repair edits were needed;
+its output is still canonical formatted JSON and may differ from the original
+input.
+
+## Development
+
+```powershell
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --locked
+cargo package --locked
+```
+
+CI runs these checks on Linux, macOS, Windows, and Rust 1.73.
 
 ## Releasing
 
-The tag-driven release workflow requires the tag and Cargo package version to match. After CI succeeds on the intended commit, create and push a signed or annotated tag such as `v0.1.0`; GitHub Actions builds the platform archives, generates checksums, and creates the GitHub release. Tags containing a hyphen, such as `v0.2.0-alpha.1`, produce prereleases.
+The Release workflow can be started manually to build and upload all platform
+archives without creating a GitHub Release. Use that rehearsal before tagging.
 
-## Comparison
+For a real release, the Git tag and Cargo package version must match exactly.
+After CI succeeds on the intended commit, push an annotated or signed tag such
+as `v0.1.0`. Tags containing a hyphen produce prereleases.
 
-| Tool | Formatting | Repair | Handwritten diagnostics | Stats |
-| --- | --- | --- | --- | --- |
-| `jqr` | Yes | MVP rules | Yes | Yes |
-| `jq` | Yes | No | No | No |
-| `json_pp` | Yes | No | No | No |
+## License
+
+MIT

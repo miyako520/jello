@@ -1,3 +1,3 @@
 fn main() {
-    std::process::exit(jqr::cli::run());
+    std::process::exit(jello::run_cli());
 }

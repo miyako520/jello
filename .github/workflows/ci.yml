@@ -47,3 +47,29 @@ jobs:
         run: rustup toolchain install 1.73.0 --profile minimal
       - name: Check minimum supported Rust
         run: cargo +1.73.0 check --all-targets --locked
+
+  package-smoke:
+    name: package and binary smoke test
+    needs:
+      - stable
+      - msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - name: Verify Cargo package
+        run: cargo package --locked
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Smoke test executable
+        shell: bash
+        run: |
+          ./target/release/jello --version
+          printf '%s' '{"name":"Ada","items":[1,true,null]}' \
+            | ./target/release/jello --compact \
+            | grep -Fx '{"name":"Ada","items":[1,true,null]}'
+          printf '%s\n' '{"ready":true}' > smoke.json
+          ./target/release/jello --check --compact smoke.json
