@@ -162,15 +162,6 @@ cargo package --locked
 
 CI runs these checks on Linux, macOS, Windows, and Rust 1.73.
 
-## Releasing
-
-The Release workflow can be started manually to build and upload all platform
-archives without creating a GitHub Release. Use that rehearsal before tagging.
-
-For a real release, the Git tag and Cargo package version must match exactly.
-After CI succeeds on the intended commit, push an annotated or signed tag such
-as `v0.1.0`. Tags containing a hyphen produce prereleases.
-
 ## License
 
 MIT
