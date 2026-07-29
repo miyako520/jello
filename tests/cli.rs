@@ -24,12 +24,18 @@ fn run_bytes(args: &[&str], input: Option<&[u8]>) -> Output {
     }
     let mut child = command.spawn().expect("failed to spawn jello");
     if let Some(input) = input {
-        child
+        let result = child
             .stdin
             .take()
             .expect("stdin was not piped")
-            .write_all(input)
-            .expect("failed to write stdin");
+            .write_all(input);
+        if let Err(error) = result {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "failed to write stdin"
+            );
+        }
     }
     child.wait_with_output().expect("failed to wait for jello")
 }
