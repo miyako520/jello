@@ -54,6 +54,17 @@ fn invalid_utf8_is_invalid_content() {
 }
 
 #[test]
+fn diagnostics_do_not_emit_untrusted_terminal_controls() {
+    let output = run(&["--color", "never"], Some("\u{1b}]52;c;VEVTVA==\u{7}{}"));
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r"\u{001B}"));
+    assert!(stderr.contains(r"\u{0007}"));
+    assert!(stderr.chars().all(|ch| ch == '\n' || !ch.is_control()));
+}
+
+#[test]
 fn version_reports_package_version() {
     let output = jello()
         .arg("--version")

@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-29
+
 ### Added
 
 - Handwritten JSON lexer and recursive-descent parser with source spans.
@@ -41,4 +43,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recovery after string escape errors, EOF source rendering, and CLI option
   precedence/color behavior.
 
-[Unreleased]: https://github.com/miyako520/jello/commits/
+### Security
+
+- Escaped untrusted terminal control characters in diagnostic messages, source
+  labels, and source snippets while preserving accurate caret positions.
+
+[Unreleased]: https://github.com/miyako520/jello/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/miyako520/jello/releases/tag/v0.1.0

@@ -211,8 +211,10 @@ pub fn render_diagnostic(
     color: bool,
 ) -> String {
     let error = style("error", "31", color);
-    let code = style(diag.code, "33", color);
-    let mut out = format!("{}[{}]: {}\n", error, code, diag.message(lang));
+    let safe_code = escape_terminal_text(diag.code);
+    let code = style(&safe_code, "33", color);
+    let message = escape_terminal_text(&diag.message(lang));
+    let mut out = format!("{}[{}]: {}\n", error, code, message);
     let Some(span) = diag.span else {
         return out;
     };
@@ -223,7 +225,10 @@ pub fn render_diagnostic(
     let arrow = style("-->", "34", color);
     out.push_str(&format!(
         " {} {}:{}:{}\n",
-        arrow, source_label, line_number, span.start.column
+        arrow,
+        escape_terminal_text(source_label),
+        line_number,
+        span.start.column
     ));
     out.push_str(&format!(
         "{}\n",
@@ -238,21 +243,22 @@ pub fn render_diagnostic(
     let last = (line_number + 1).min(lines.len());
     for (index, line) in lines.iter().enumerate().take(last).skip(first) {
         let number = index + 1;
+        let (safe_line, column_offsets) = escape_source_line(line);
         let gutter = style(
             &format!("{:>width$} |", number, width = gutter_width),
             "34",
             color,
         );
-        out.push_str(&format!("{} {}\n", gutter, line));
+        out.push_str(&format!("{} {}\n", gutter, safe_line));
         if number == line_number {
-            let marker_width = if span.end.line == span.start.line {
-                span.end.column.saturating_sub(span.start.column).max(1)
+            let marker_start =
+                rendered_column(&column_offsets, span.start.column.saturating_sub(1));
+            let marker_end = if span.end.line == span.start.line {
+                rendered_column(&column_offsets, span.end.column.saturating_sub(1))
             } else {
-                line.chars()
-                    .count()
-                    .saturating_sub(span.start.column.saturating_sub(1))
-                    .max(1)
+                *column_offsets.last().unwrap_or(&0)
             };
+            let marker_width = marker_end.saturating_sub(marker_start).max(1);
             let marker = style(
                 &format!("^{}", "~".repeat(marker_width.saturating_sub(1))),
                 "31",
@@ -266,12 +272,55 @@ pub fn render_diagnostic(
             out.push_str(&format!(
                 "{} {}{}\n",
                 gutter,
-                " ".repeat(span.start.column.saturating_sub(1)),
+                " ".repeat(marker_start),
                 marker
             ));
         }
     }
     out
+}
+
+fn escape_terminal_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        push_terminal_safe_char(&mut escaped, ch);
+    }
+    escaped
+}
+
+fn escape_source_line(line: &str) -> (String, Vec<usize>) {
+    let mut escaped = String::with_capacity(line.len());
+    let mut column_offsets = Vec::with_capacity(line.chars().count() + 1);
+    let mut rendered_column = 0;
+
+    for ch in line.chars() {
+        column_offsets.push(rendered_column);
+        let before = escaped.len();
+        push_terminal_safe_char(&mut escaped, ch);
+        rendered_column += escaped[before..].chars().count();
+    }
+    column_offsets.push(rendered_column);
+    (escaped, column_offsets)
+}
+
+fn rendered_column(column_offsets: &[usize], source_column: usize) -> usize {
+    column_offsets
+        .get(source_column)
+        .copied()
+        .unwrap_or_else(|| *column_offsets.last().unwrap_or(&0))
+}
+
+fn push_terminal_safe_char(output: &mut String, ch: char) {
+    match ch {
+        '\n' => output.push_str(r"\n"),
+        '\r' => output.push_str(r"\r"),
+        '\t' => output.push_str(r"\t"),
+        ch if ch.is_control() => {
+            use std::fmt::Write;
+            let _ = write!(output, "\\u{{{:04X}}}", ch as u32);
+        }
+        ch => output.push(ch),
+    }
 }
 
 fn source_lines(source: &str) -> Vec<&str> {
@@ -364,6 +413,70 @@ mod tests {
         assert!(rendered.contains("\u{1b}[31m"));
         assert!(rendered.contains("\u{1b}[34m"));
         assert!(rendered.contains("\u{1b}[0m"));
+    }
+
+    #[test]
+    fn escapes_terminal_controls_in_untrusted_diagnostic_text() {
+        let source = "a\u{1b}\u{7}\u{9b}z";
+        let span = Span::new(Position::new(1, 1, 2), Position::new(5, 1, 5));
+        let diag = Diagnostic::new(
+            "E\u{1b}]8;;bad\u{7}",
+            DiagnosticKind::Io("bad\u{1b}]52;c;payload\u{7}\npath".to_string()),
+            Some(span),
+        );
+
+        let rendered = render_diagnostic(
+            &diag,
+            source,
+            "input\u{1b}]0;owned\u{7}\n.json",
+            Language::En,
+            false,
+        );
+
+        assert!(rendered.contains(r"\u{001B}"));
+        assert!(rendered.contains(r"\u{0007}"));
+        assert!(rendered.contains(r"\u{009B}"));
+        assert!(rendered.contains(r"\n"));
+        assert!(rendered.chars().all(|ch| ch == '\n' || !ch.is_control()));
+    }
+
+    #[test]
+    fn caret_positions_follow_visible_control_escapes() {
+        let source = "a\u{1b}z";
+        let span = Span::new(Position::new(2, 1, 3), Position::new(3, 1, 4));
+        let diag = Diagnostic::new("E001", DiagnosticKind::InvalidCharacter('z'), Some(span));
+
+        let rendered = render_diagnostic(&diag, source, "<stdin>", Language::En, false);
+        let source_line = rendered
+            .lines()
+            .find(|line| line.contains(r"a\u{001B}z"))
+            .unwrap();
+        let marker_line = rendered.lines().find(|line| line.contains('^')).unwrap();
+
+        assert_eq!(source_line.find('z'), marker_line.find('^'));
+    }
+
+    #[test]
+    fn color_output_only_contains_renderer_ansi_sequences() {
+        let span = Span::new(Position::new(0, 1, 1), Position::new(1, 1, 2));
+        let diag = Diagnostic::new(
+            "E001",
+            DiagnosticKind::InvalidCharacter('\u{1b}'),
+            Some(span),
+        );
+
+        let rendered = render_diagnostic(
+            &diag,
+            "\u{1b}",
+            "input\u{1b}]52;c;payload\u{7}",
+            Language::En,
+            true,
+        );
+
+        assert!(rendered.contains("\u{1b}[31m"));
+        assert!(rendered.contains(r"\u{001B}"));
+        assert!(!rendered.contains("\u{1b}]52;"));
+        assert!(!rendered.contains('\u{7}'));
     }
 
     #[test]
