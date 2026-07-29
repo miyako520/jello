@@ -1,0 +1,21 @@
+.github/workflows/release.yml
+  s_d00eb2b6d40d10::t_f90dad89b23ae7 154
+  s_d00eb2b6d40d10::t_9be32b94ce7ef2 165-176,178-187,200
+  s_d00eb2b6d40d10::t_17ecf6aad0c873 177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "1f33317db10e465c074d070afcf16d9da24959c8",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
