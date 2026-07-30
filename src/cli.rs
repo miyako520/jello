@@ -22,6 +22,7 @@ use std::os::windows::io::AsRawHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
+    easy: bool,
     fix: bool,
     stats: bool,
     check: bool,
@@ -49,6 +50,18 @@ enum InputError {
 struct InputData {
     source: String,
     snapshot: Option<FileSnapshot>,
+}
+
+#[derive(Debug)]
+struct EasyOutput {
+    path: PathBuf,
+    cleanup_warning: Option<EasyCleanupWarning>,
+}
+
+#[derive(Debug)]
+struct EasyCleanupWarning {
+    path: PathBuf,
+    error: io::Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,7 +266,7 @@ fn run_with_io(
     let stats_output = options.stats.then(|| {
         Stats::from_value(&value, original.len(), formatted_size).render(original_valid, fix_count)
     });
-    if options.write {
+    if options.write || options.easy {
         if let Some(stats) = &stats_output {
             writeln!(stderr, "{}", stats).map_err(|_| 2)?;
         }
@@ -281,17 +294,58 @@ fn run_with_io(
             stderr.write_all(rendered.as_bytes()).map_err(|_| 2)?;
             return Err(2);
         }
+    } else if options.easy {
+        let path = options.input.as_deref().expect("validated easy input path");
+        stdout.write_all(canonical.as_bytes()).map_err(|_| 2)?;
+        let outcome = match write_easy_output(path, canonical.as_bytes()) {
+            Ok(output_path) => output_path,
+            Err(error) => {
+                let diagnostic = easy_save_diagnostic(error, options.lang);
+                let rendered =
+                    render_diagnostic(&diagnostic, "", &source_label, options.lang, use_color);
+                stderr.write_all(rendered.as_bytes()).map_err(|_| 2)?;
+                return Err(2);
+            }
+        };
+        if let Some(warning) = outcome.cleanup_warning {
+            let _ = match options.lang {
+                Language::En => writeln!(
+                    stderr,
+                    "warning: formatted output was saved, but temporary file {:?} could not be removed: {}",
+                    warning.path, warning.error
+                ),
+                Language::Zh => writeln!(
+                    stderr,
+                    "警告：格式化文件已保存，但无法删除临时文件 {:?}：{}",
+                    warning.path, warning.error
+                ),
+            };
+        }
+        let _ = match options.lang {
+            Language::En => writeln!(stderr, "saved formatted output to {:?}", outcome.path),
+            Language::Zh => writeln!(stderr, "已将格式化结果保存到 {:?}", outcome.path),
+        };
     } else {
         stdout.write_all(canonical.as_bytes()).map_err(|_| 2)?;
     }
 
-    if !options.write {
+    if !options.write && !options.easy {
         if let Some(stats) = stats_output {
             writeln!(stderr, "{}", stats).map_err(|_| 2)?;
         }
     }
 
     Ok(())
+}
+
+fn easy_save_diagnostic(error: io::Error, language: Language) -> Diagnostic {
+    let message = match language {
+        Language::En => {
+            format!("formatted output was printed, but the new file could not be saved: {error}")
+        }
+        Language::Zh => format!("格式化结果已显示，但无法保存新文件：{error}"),
+    };
+    Diagnostic::new("E011", DiagnosticKind::Io(message), None)
 }
 
 fn format_error_diagnostic(error: FormatError) -> (Diagnostic, i32) {
@@ -360,6 +414,7 @@ fn parse_args_with_language(
     language: Language,
 ) -> Result<ParsedArgs, Diagnostic> {
     let mut options = Options {
+        easy: false,
         fix: false,
         stats: false,
         check: false,
@@ -375,6 +430,12 @@ fn parse_args_with_language(
     let mut positional_only = false;
 
     let mut iter = args.into_iter();
+    if matches!(iter.as_slice().first(), Some(arg) if arg == OsStr::new("easy")) {
+        iter.next();
+        options.easy = true;
+        options.fix = true;
+        options.input_mode = InputMode::Json5;
+    }
     while let Some(arg) = iter.next() {
         if positional_only {
             set_input(&mut options, PathBuf::from(arg))?;
@@ -386,6 +447,7 @@ fn parse_args_with_language(
         };
         match value {
             "--" => positional_only = true,
+
             "--fix" => options.fix = true,
             "--stats" => options.stats = true,
             "--check" => options.check = true,
@@ -469,6 +531,18 @@ fn parse_args_with_language(
         return Err(invalid_argument(
             "--write requires an input path",
             "`--write` 需要输入路径",
+        ));
+    }
+    if options.easy && options.input.is_none() {
+        return Err(invalid_argument(
+            "`easy` requires an input path",
+            "`easy` 需要输入文件路径",
+        ));
+    }
+    if options.easy && (options.check || options.write) {
+        return Err(invalid_argument(
+            "`easy` cannot be combined with `--check` or `--write`",
+            "`easy` 不能与 `--check` 或 `--write` 同时使用",
         ));
     }
     if compact && indent.is_some() {
@@ -668,6 +742,100 @@ fn read_limited<R: Read>(mut reader: R) -> Result<String, InputError> {
     String::from_utf8(bytes).map_err(|_| {
         InputError::Content(Diagnostic::new("E015", DiagnosticKind::InvalidUtf8, None))
     })
+}
+
+fn write_easy_output(path: &Path, contents: &[u8]) -> io::Result<EasyOutput> {
+    write_easy_output_with(
+        path,
+        contents,
+        |file, contents| file.write_all(contents),
+        |path| fs::remove_file(path),
+    )
+}
+
+fn write_easy_output_with<F, R>(
+    path: &Path,
+    contents: &[u8],
+    write_contents: F,
+    remove_published_temporary: R,
+) -> io::Result<EasyOutput>
+where
+    F: FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    R: FnOnce(&Path) -> io::Result<()>,
+{
+    let permissions = fs::metadata(path)?.permissions();
+    let (temporary_path, mut temporary) = create_temporary_sibling(path, "easy")?;
+    let prepare_result = (|| {
+        temporary.set_permissions(permissions)?;
+        write_contents(&mut temporary, contents)?;
+        temporary.flush()?;
+        temporary.sync_all()
+    })();
+    drop(temporary);
+
+    if let Err(error) = prepare_result {
+        return Err(remove_easy_temporary(&temporary_path, error));
+    }
+
+    for attempt in 0..1000 {
+        let candidate = easy_output_path(path, attempt);
+        match fs::hard_link(&temporary_path, &candidate) {
+            Ok(()) => {
+                let cleanup_warning =
+                    remove_published_temporary(&temporary_path)
+                        .err()
+                        .map(|error| EasyCleanupWarning {
+                            path: temporary_path,
+                            error,
+                        });
+                return Ok(EasyOutput {
+                    path: candidate,
+                    cleanup_warning,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(remove_easy_temporary(&temporary_path, error)),
+        }
+    }
+
+    Err(remove_easy_temporary(
+        &temporary_path,
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not reserve an easy-mode output file name",
+        ),
+    ))
+}
+
+fn remove_easy_temporary(path: &Path, error: io::Error) -> io::Error {
+    match fs::remove_file(path) {
+        Ok(()) => error,
+        Err(cleanup_error) => io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; failed to remove temporary file {:?}: {cleanup_error}",
+                path
+            ),
+        ),
+    }
+}
+
+fn easy_output_path(path: &Path, attempt: usize) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut name = OsString::from(
+        path.file_stem()
+            .or_else(|| path.file_name())
+            .unwrap_or_else(|| OsStr::new("output")),
+    );
+    name.push(".fixed");
+    if attempt > 0 {
+        name.push(format!("-{}", attempt + 1));
+    }
+    if let Some(extension) = path.extension().filter(|extension| !extension.is_empty()) {
+        name.push(".");
+        name.push(extension);
+    }
+    parent.join(name)
 }
 
 fn replace_file_safely(
@@ -905,7 +1073,8 @@ fn print_help(writer: &mut dyn Write) -> io::Result<()> {
     writeln!(
         writer,
         "jello {version}\n\n\
-USAGE:\n  jello [OPTIONS] [--] [path]\n\n\
+USAGE:\n  jello [OPTIONS] [--] [path]\n  jello easy [OPTIONS] [--] <path>\n\n\
+COMMANDS:\n  easy                   Repair, print, and save as a new .fixed file\n\n\
 OPTIONS:\n  --fix                  Repair supported mistakes before formatting\n  --stats                Print structural statistics to stderr\n  --check                Exit 1 when input is not already formatted\n  --write, -i            Replace a checked regular input file\n  --json5                Accept the documented JSON5 subset\n  --indent <0..16>       Pretty-print indentation width (default: 2)\n  --compact              Emit compact JSON\n  --lang <zh|en>         Diagnostic language\n  --color <MODE>         auto, always, or never\n  --version, -V          Print version\n  --help, -h             Print help\n\n\
 Reads stdin when no path is provided.\n\
 Exit codes: 0 success, 1 invalid content/check failed, 2 argument or I/O error.",
@@ -939,6 +1108,148 @@ mod tests {
         let result = run_with_io(Vec::new(), &mut stdin, &mut stdout, &mut stderr);
 
         assert_eq!(result, Err(2));
+    }
+
+    #[test]
+    fn easy_stdout_failure_does_not_create_an_output_file() {
+        let path = temporary_test_path("easy-stdout.json");
+        fs::write(&path, "{}").unwrap();
+        let output_path = easy_output_path(&path, 0);
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = BrokenWriter;
+        let mut stderr = Vec::new();
+
+        let result = run_with_io(
+            vec!["easy".into(), path.clone().into()],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(result, Err(2));
+        assert!(!output_path.exists());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn easy_output_name_omits_an_empty_extension() {
+        assert_eq!(
+            easy_output_path(Path::new("data."), 0),
+            PathBuf::from("data.fixed")
+        );
+    }
+
+    #[test]
+    fn easy_output_inherits_source_readonly_permission() {
+        let path = temporary_test_path("easy-permissions.json");
+        fs::write(&path, "{}").unwrap();
+        let original_permissions = fs::metadata(&path).unwrap().permissions();
+        let mut readonly_permissions = original_permissions.clone();
+        readonly_permissions.set_readonly(true);
+        fs::set_permissions(&path, readonly_permissions).unwrap();
+
+        let output_path = write_easy_output(&path, b"{}\n").unwrap().path;
+        let inherited_readonly = fs::metadata(&output_path).unwrap().permissions().readonly();
+
+        fs::set_permissions(&path, original_permissions.clone()).unwrap();
+        fs::set_permissions(&output_path, original_permissions).unwrap();
+        assert!(!sibling_path(&path, "easy", 0).exists());
+        fs::remove_file(path).unwrap();
+        fs::remove_file(output_path).unwrap();
+        assert!(inherited_readonly);
+    }
+
+    #[test]
+    fn easy_write_failure_leaves_no_fixed_or_temporary_file() {
+        let directory = temporary_test_path("easy-partial-write");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("data.json");
+        fs::write(&path, "{}").unwrap();
+
+        let result = write_easy_output_with(
+            &path,
+            b"complete",
+            |file, _contents| {
+                file.write_all(b"partial")?;
+                Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "injected write failure",
+                ))
+            },
+            |path| fs::remove_file(path),
+        );
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WriteZero);
+        let entries: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![OsString::from("data.json")]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn easy_cleanup_failure_is_reported_after_successful_publish() {
+        let directory = temporary_test_path("easy-cleanup-warning");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("data.json");
+        fs::write(&path, "{}").unwrap();
+        let expected_output = directory.join("data.fixed.json");
+        let temporary_path = sibling_path(&path, "easy", 0);
+
+        let outcome = write_easy_output_with(
+            &path,
+            b"complete",
+            |file, contents| file.write_all(contents),
+            |_path| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected cleanup failure",
+                ))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.path, expected_output);
+        assert_eq!(fs::read(&outcome.path).unwrap(), b"complete");
+        let warning = outcome.cleanup_warning.unwrap();
+        assert_eq!(warning.path, temporary_path);
+        assert_eq!(warning.error.kind(), io::ErrorKind::PermissionDenied);
+
+        fs::remove_file(temporary_path).unwrap();
+        fs::remove_file(outcome.path).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn easy_save_error_explains_that_stdout_was_already_printed() {
+        let english = easy_save_diagnostic(
+            io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+            Language::En,
+        );
+        let chinese = easy_save_diagnostic(
+            io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+            Language::Zh,
+        );
+
+        assert!(english
+            .message(Language::En)
+            .contains("formatted output was printed, but the new file could not be saved"));
+        assert!(chinese
+            .message(Language::Zh)
+            .contains("格式化结果已显示，但无法保存新文件"));
+    }
+
+    #[test]
+    fn easy_is_only_a_subcommand_in_the_first_argument_position() {
+        let ParsedArgs::Run(options) = parse_args(vec!["--fix".into(), "easy".into()]).unwrap()
+        else {
+            panic!("expected runnable options");
+        };
+
+        assert!(!options.easy);
+        assert_eq!(options.input, Some(PathBuf::from("easy")));
     }
 
     #[test]

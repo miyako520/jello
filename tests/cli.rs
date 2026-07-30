@@ -80,7 +80,7 @@ fn version_reports_package_version() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout was not UTF-8"),
-        "jello 0.1.0\n"
+        "jello 0.1.1\n"
     );
     assert!(output.stderr.is_empty());
 }
@@ -126,6 +126,66 @@ fn writes_formatted_file_and_rejects_write_without_path() {
 
     let missing = run(&["--write"], None);
     assert_eq!(missing.status.code(), Some(2));
+}
+
+#[test]
+fn easy_mode_repairs_prints_and_saves_without_touching_source() {
+    let directory = unique_path("easy");
+    fs::create_dir(&directory).unwrap();
+    let source_path = directory.join("data.json");
+    let output_path = directory.join("data.fixed.json");
+    let original = "{note:'ok',items:[1,2,]}";
+    fs::write(&source_path, original).unwrap();
+
+    let output = jello().arg("easy").arg(&source_path).output().unwrap();
+
+    let expected = "{\n  \"note\": \"ok\",\n  \"items\": [\n    1,\n    2\n  ]\n}\n";
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    assert_eq!(fs::read_to_string(&source_path).unwrap(), original);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), expected);
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("saved formatted output"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn easy_mode_uses_numbered_output_and_writes_nothing_for_unrepairable_input() {
+    let directory = unique_path("easy-collision");
+    fs::create_dir(&directory).unwrap();
+    let source_path = directory.join("data.json");
+    fs::write(&source_path, "{}").unwrap();
+    fs::write(directory.join("data.fixed.json"), "keep").unwrap();
+
+    let output = jello().arg("easy").arg(&source_path).output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(directory.join("data.fixed.json")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        fs::read_to_string(directory.join("data.fixed-2.json")).unwrap(),
+        "{}\n"
+    );
+
+    let invalid_path = directory.join("invalid.json");
+    fs::write(&invalid_path, "{a:}").unwrap();
+    let invalid = jello().arg("easy").arg(&invalid_path).output().unwrap();
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(!directory.join("invalid.fixed.json").exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn easy_mode_requires_an_input_path() {
+    let output = run(&["easy"], None);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("`easy` requires an input path"));
 }
 
 #[test]

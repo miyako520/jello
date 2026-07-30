@@ -6,6 +6,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-30
+
+### Added
+
+- Added `jello easy <path>` for a beginner-friendly workflow that accepts the
+  supported JSON5 subset, performs conservative repairs, prints the formatted
+  result, and saves it to a non-overwriting `.fixed` sibling file while
+  preserving ordinary source permissions.
+
 ## [0.1.0] - 2026-07-29
 
 ### Added
@@ -48,5 +57,6 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Escaped untrusted terminal control characters in diagnostic messages, source
   labels, and source snippets while preserving accurate caret positions.
 
-[Unreleased]: https://github.com/miyako520/jello/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/miyako520/jello/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/miyako520/jello/releases/tag/v0.1.1
 [0.1.0]: https://github.com/miyako520/jello/releases/tag/v0.1.0

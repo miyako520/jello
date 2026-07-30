@@ -20,6 +20,19 @@ publish Linux, macOS, and Windows archives plus `SHA256SUMS` on the
 
 ## Quick start
 
+For the simplest workflow, let Jello accept its supported JSON5 syntax,
+conservatively repair the document, print the formatted JSON, and save a new
+file without changing the source:
+
+```powershell
+jello easy data.json
+```
+
+This creates `data.fixed.json`. If that name already exists, Jello uses
+`data.fixed-2.json`, then `data.fixed-3.json`, and so on. Unrepairable input
+does not create an output file. The new file inherits the source file's
+ordinary permissions.
+
 Format stdin or a file:
 
 ```powershell
@@ -50,6 +63,9 @@ jello --fix --write broken.json
 
 ```text
 jello [OPTIONS] [--] [path]
+jello easy [OPTIONS] [--] <path>
+
+easy                   Repair, print, and save as a new .fixed file
 
 --fix                  Repair supported mistakes before formatting
 --stats                Print structural statistics to stderr
@@ -110,6 +126,14 @@ operation. Replacement deliberately has directory-entry replacement semantics:
 it uses a sibling temporary file and preserves ordinary permissions, but does
 not preserve every platform ACL, extended attribute, alternate data stream,
 owner, or timestamp.
+
+Easy mode prints the formatted JSON before saving the new file. If saving
+fails, the error explicitly says that terminal output was already produced.
+Jello writes and synchronizes a hidden sibling temporary file first, then
+atomically publishes it under an unused `.fixed` name. Existing output files
+are never overwritten, and a write failure does not leave an incomplete
+`.fixed` file. If the formatted file is published but the temporary hard link
+cannot be removed, Jello reports a warning with the retained temporary path.
 
 ## Supported JSON5 subset
 
