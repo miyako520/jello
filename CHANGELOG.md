@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-31
+
 ### Added
 
 - Added the optional Windows `jello-drop.exe` helper for processing one or
@@ -72,6 +74,7 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Escaped untrusted terminal control characters in diagnostic messages, source
   labels, and source snippets while preserving accurate caret positions.
 
-[Unreleased]: https://github.com/miyako520/jello/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/miyako520/jello/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/miyako520/jello/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/miyako520/jello/releases/tag/v0.1.1
 [0.1.0]: https://github.com/miyako520/jello/releases/tag/v0.1.0
