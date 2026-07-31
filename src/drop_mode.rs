@@ -203,7 +203,7 @@ fn run_with_optional_config(
     output: &mut dyn Write,
     is_terminal: bool,
 ) -> i32 {
-    run_with_io_result(args, config_path, input, output, is_terminal).unwrap_or(2)
+    run_with_io_result(args, config_path, input, output, is_terminal, save_language).unwrap_or(2)
 }
 
 struct DropArguments {
@@ -369,13 +369,17 @@ fn run_settings(
     }
 }
 
-fn run_with_io_result(
+fn run_with_io_result<S>(
     args: Vec<OsString>,
     config_path: Option<&Path>,
     input: &mut dyn Read,
     output: &mut dyn Write,
     is_terminal: bool,
-) -> io::Result<i32> {
+    save_config: S,
+) -> io::Result<i32>
+where
+    S: Fn(&Path, Language) -> io::Result<()>,
+{
     let argument_language = requested_language(&args, config_path);
     let arguments = match parse_arguments(args) {
         Ok(arguments) => arguments,
@@ -395,7 +399,7 @@ fn run_with_io_result(
             Ok(Some(language)) => language,
             Ok(None) if is_terminal => {
                 let selected = choose_language(input, output)?;
-                match save_language(config_path, selected) {
+                match save_config(config_path, selected) {
                     Ok(()) => selected,
                     Err(error) => {
                         writeln!(
@@ -792,21 +796,26 @@ mod tests {
     fn failed_first_run_config_save_warns_and_continues_in_english() {
         let directory = temporary_directory("config-save-failure");
         fs::create_dir(&directory).unwrap();
-        let blocking_file = directory.join("not-a-directory");
-        fs::write(&blocking_file, "block").unwrap();
-        let config_path = blocking_file.join("config");
+        let config_path = directory.join("config");
         let source_path = directory.join("data.json");
         fs::write(&source_path, "{name:'Ada'}").unwrap();
         let mut input = std::io::Cursor::new(b"2\n\n".to_vec());
         let mut output = Vec::new();
 
-        let exit_code = run_with_io(
+        let exit_code = run_with_io_result(
             vec![source_path.into()],
-            &config_path,
+            Some(&config_path),
             &mut input,
             &mut output,
             true,
-        );
+            |_path, _language| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated save failure",
+                ))
+            },
+        )
+        .unwrap();
 
         let rendered = String::from_utf8(output).unwrap();
         assert_eq!(exit_code, 0);
