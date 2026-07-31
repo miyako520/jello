@@ -260,6 +260,7 @@ fn sibling_path(path: &Path, suffix: &str, attempt: usize) -> PathBuf {
     parent.join(name)
 }
 
+#[cfg(windows)]
 fn other_io_error(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::Other, message)
 }
