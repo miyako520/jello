@@ -18,6 +18,8 @@ use std::ffi::c_void;
 #[cfg(windows)]
 use std::mem::MaybeUninit;
 #[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+#[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,15 +55,15 @@ struct InputData {
 }
 
 #[derive(Debug)]
-struct EasyOutput {
-    path: PathBuf,
-    cleanup_warning: Option<EasyCleanupWarning>,
+pub(crate) struct EasyOutput {
+    pub(crate) path: PathBuf,
+    pub(crate) cleanup_warning: Option<EasyCleanupWarning>,
 }
 
 #[derive(Debug)]
-struct EasyCleanupWarning {
-    path: PathBuf,
-    error: io::Error,
+pub(crate) struct EasyCleanupWarning {
+    pub(crate) path: PathBuf,
+    pub(crate) error: io::Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,13 @@ extern "system" {
         file: *mut c_void,
         information: *mut WindowsFileInformation,
     ) -> i32;
+    fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    fn GetFullPathNameW(
+        file_name: *const u16,
+        buffer_length: u32,
+        buffer: *mut u16,
+        file_part: *mut *mut u16,
+    ) -> u32;
 }
 
 pub(crate) fn run() -> i32 {
@@ -744,7 +753,184 @@ fn read_limited<R: Read>(mut reader: R) -> Result<String, InputError> {
     })
 }
 
-fn write_easy_output(path: &Path, contents: &[u8]) -> io::Result<EasyOutput> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EasyPublish {
+    Linked,
+    #[cfg(windows)]
+    Moved,
+}
+
+#[cfg(not(windows))]
+fn publish_easy_candidate(temporary: &Path, candidate: &Path) -> io::Result<EasyPublish> {
+    fs::hard_link(temporary, candidate)?;
+    Ok(EasyPublish::Linked)
+}
+
+#[cfg(windows)]
+fn publish_easy_candidate(temporary: &Path, candidate: &Path) -> io::Result<EasyPublish> {
+    publish_easy_candidate_with(
+        temporary,
+        candidate,
+        |from, to| fs::hard_link(from, to),
+        windows_move_no_replace,
+    )
+}
+
+#[cfg(windows)]
+fn publish_easy_candidate_with<H, M>(
+    temporary: &Path,
+    candidate: &Path,
+    hard_link: H,
+    move_no_replace: M,
+) -> io::Result<EasyPublish>
+where
+    H: FnOnce(&Path, &Path) -> io::Result<()>,
+    M: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    match hard_link(temporary, candidate) {
+        Ok(()) => Ok(EasyPublish::Linked),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(error),
+        Err(link_error) => match move_no_replace(temporary, candidate) {
+            Ok(()) => Ok(EasyPublish::Moved),
+            Err(move_error) => Err(io::Error::new(
+                move_error.kind(),
+                format!(
+                    "hard-link publish failed: {link_error}; no-replace move failed: {move_error}"
+                ),
+            )),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn windows_move_no_replace(temporary: &Path, candidate: &Path) -> io::Result<()> {
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    const ERROR_FILE_EXISTS: i32 = 80;
+    const ERROR_ALREADY_EXISTS: i32 = 183;
+
+    let temporary = windows_full_path(temporary)?;
+    let candidate_name = candidate.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "easy-mode output path has no file name",
+        )
+    })?;
+    let candidate = temporary
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "temporary path has no parent"))?
+        .join(candidate_name);
+    let temporary = windows_verbatim_path(&temporary)?;
+    let candidate = windows_verbatim_path(&candidate)?;
+
+    let moved = unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            candidate.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved != 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if matches!(
+        error.raw_os_error(),
+        Some(ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS)
+    ) {
+        Err(io::Error::new(io::ErrorKind::AlreadyExists, error))
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(windows)]
+fn windows_full_path(path: &Path) -> io::Result<PathBuf> {
+    let input = windows_null_terminated(path.as_os_str().encode_wide())?;
+    let mut required = unsafe {
+        GetFullPathNameW(
+            input.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    loop {
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(required as usize)
+            .map_err(|_| other_io_error("allocation failed while resolving a Windows path"))?;
+        buffer.resize(required as usize, 0_u16);
+        let length = unsafe {
+            GetFullPathNameW(
+                input.as_ptr(),
+                required,
+                buffer.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length < required {
+            buffer.truncate(length as usize);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        required = length;
+    }
+}
+
+#[cfg(windows)]
+fn windows_verbatim_path(path: &Path) -> io::Result<Vec<u16>> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let verbatim: Vec<u16> = "\\\\?\\".encode_utf16().collect();
+    let device: Vec<u16> = "\\\\.\\".encode_utf16().collect();
+    let unc: Vec<u16> = "\\\\".encode_utf16().collect();
+    let mut output = Vec::new();
+    if wide.starts_with(&verbatim) || wide.starts_with(&device) {
+        output
+            .try_reserve_exact(wide.len() + 1)
+            .map_err(|_| other_io_error("allocation failed while preparing a Windows path"))?;
+        output.extend_from_slice(&wide);
+    } else if wide.starts_with(&unc) {
+        let prefix: Vec<u16> = "\\\\?\\UNC\\".encode_utf16().collect();
+        output
+            .try_reserve_exact(prefix.len() + wide.len() - 2 + 1)
+            .map_err(|_| other_io_error("allocation failed while preparing a Windows path"))?;
+        output.extend_from_slice(&prefix);
+        output.extend_from_slice(&wide[2..]);
+    } else {
+        output
+            .try_reserve_exact(verbatim.len() + wide.len() + 1)
+            .map_err(|_| other_io_error("allocation failed while preparing a Windows path"))?;
+        output.extend_from_slice(&verbatim);
+        output.extend_from_slice(&wide);
+    }
+    output.push(0);
+    Ok(output)
+}
+
+#[cfg(windows)]
+fn windows_null_terminated<I>(wide: I) -> io::Result<Vec<u16>>
+where
+    I: IntoIterator<Item = u16>,
+{
+    let mut wide: Vec<u16> = wide.into_iter().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows path contains a null character",
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+pub(crate) fn write_easy_output(path: &Path, contents: &[u8]) -> io::Result<EasyOutput> {
     write_easy_output_with(
         path,
         contents,
@@ -763,6 +949,27 @@ where
     F: FnOnce(&mut File, &[u8]) -> io::Result<()>,
     R: FnOnce(&Path) -> io::Result<()>,
 {
+    write_easy_output_with_publish(
+        path,
+        contents,
+        write_contents,
+        remove_published_temporary,
+        publish_easy_candidate,
+    )
+}
+
+fn write_easy_output_with_publish<F, R, P>(
+    path: &Path,
+    contents: &[u8],
+    write_contents: F,
+    remove_published_temporary: R,
+    mut publish_candidate: P,
+) -> io::Result<EasyOutput>
+where
+    F: FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    R: FnOnce(&Path) -> io::Result<()>,
+    P: FnMut(&Path, &Path) -> io::Result<EasyPublish>,
+{
     let permissions = fs::metadata(path)?.permissions();
     let (temporary_path, mut temporary) = create_temporary_sibling(path, "easy")?;
     let prepare_result = (|| {
@@ -779,15 +986,19 @@ where
 
     for attempt in 0..1000 {
         let candidate = easy_output_path(path, attempt);
-        match fs::hard_link(&temporary_path, &candidate) {
-            Ok(()) => {
+        match publish_candidate(&temporary_path, &candidate) {
+            Ok(publish) => {
                 let cleanup_warning =
-                    remove_published_temporary(&temporary_path)
-                        .err()
-                        .map(|error| EasyCleanupWarning {
-                            path: temporary_path,
-                            error,
-                        });
+                    match publish {
+                        EasyPublish::Linked => remove_published_temporary(&temporary_path)
+                            .err()
+                            .map(|error| EasyCleanupWarning {
+                                path: temporary_path,
+                                error,
+                            }),
+                        #[cfg(windows)]
+                        EasyPublish::Moved => None,
+                    };
                 return Ok(EasyOutput {
                     path: candidate,
                     cleanup_warning,
@@ -1137,6 +1348,167 @@ mod tests {
             easy_output_path(Path::new("data."), 0),
             PathBuf::from("data.fixed")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publish_falls_back_when_hard_links_are_unsupported() {
+        let temporary = Path::new("prepared.tmp");
+        let candidate = Path::new("data.fixed.json");
+
+        let outcome = publish_easy_candidate_with(
+            temporary,
+            candidate,
+            |_from, _to| {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "hard links unsupported",
+                ))
+            },
+            |_from, _to| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, EasyPublish::Moved);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publish_preserves_already_exists_for_numbered_retry() {
+        let temporary = Path::new("prepared.tmp");
+        let candidate = Path::new("data.fixed.json");
+
+        let error = publish_easy_candidate_with(
+            temporary,
+            candidate,
+            |_from, _to| {
+                Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "candidate exists",
+                ))
+            },
+            |_from, _to| panic!("move fallback must not run for an existing candidate"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_move_fallback_never_replaces_an_existing_candidate() {
+        let directory = temporary_test_path("windows-move-no-replace");
+        fs::create_dir(&directory).unwrap();
+        let temporary = directory.join("prepared.tmp");
+        let candidate = directory.join("data.fixed.json");
+        fs::write(&temporary, b"new").unwrap();
+        fs::write(&candidate, b"existing").unwrap();
+
+        let error = windows_move_no_replace(&temporary, &candidate).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&temporary).unwrap(), b"new");
+        assert_eq!(fs::read(&candidate).unwrap(), b"existing");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_move_fallback_publishes_an_unused_candidate() {
+        let directory = temporary_test_path("windows-move-success");
+        fs::create_dir(&directory).unwrap();
+        let temporary = directory.join("prepared.tmp");
+        let candidate = directory.join("data.fixed.json");
+        fs::write(&temporary, b"complete").unwrap();
+
+        windows_move_no_replace(&temporary, &candidate).unwrap();
+
+        assert!(!temporary.exists());
+        assert_eq!(fs::read(&candidate).unwrap(), b"complete");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_full_path_does_not_require_the_target_to_exist() {
+        let missing = temporary_test_path("missing-path")
+            .join("missing-parent")
+            .join("data.fixed.json");
+
+        let full = windows_full_path(&missing).unwrap();
+
+        assert!(full.is_absolute());
+        assert!(full.ends_with(Path::new("missing-parent").join("data.fixed.json")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn moved_publish_retries_a_numbered_name_without_cleanup() {
+        let directory = temporary_test_path("windows-moved-numbering");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("data.json");
+        let first_candidate = directory.join("data.fixed.json");
+        let second_candidate = directory.join("data.fixed-2.json");
+        fs::write(&path, "{}").unwrap();
+        fs::write(&first_candidate, b"existing").unwrap();
+        let mut attempts = 0;
+
+        let outcome = write_easy_output_with_publish(
+            &path,
+            b"complete",
+            |file, contents| file.write_all(contents),
+            |_path| panic!("a moved temporary file must not be cleaned up"),
+            |temporary, candidate| {
+                attempts += 1;
+                if candidate.exists() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "candidate exists",
+                    ));
+                }
+                fs::rename(temporary, candidate)?;
+                Ok(EasyPublish::Moved)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(attempts, 2);
+        assert_eq!(outcome.path, second_candidate);
+        assert!(outcome.cleanup_warning.is_none());
+        assert_eq!(fs::read(&first_candidate).unwrap(), b"existing");
+        assert_eq!(fs::read(&outcome.path).unwrap(), b"complete");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_publish_failure_cleans_the_prepared_temporary_file() {
+        let directory = temporary_test_path("windows-publish-cleanup");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("data.json");
+        fs::write(&path, "{}").unwrap();
+
+        let error = write_easy_output_with_publish(
+            &path,
+            b"complete",
+            |file, contents| file.write_all(contents),
+            |path| fs::remove_file(path),
+            |_temporary, _candidate| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "publish denied",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let entries: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![OsString::from("data.json")]);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

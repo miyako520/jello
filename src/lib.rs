@@ -3,6 +3,8 @@
 mod ast;
 mod cli;
 mod diagnostic;
+#[cfg(any(feature = "windows-drop", test))]
+mod drop_mode;
 mod fixer;
 mod formatter;
 mod lexer;
@@ -109,6 +111,15 @@ pub fn statistics(document: &Document, original_size: usize, formatted_size: usi
 #[doc(hidden)]
 pub fn run_cli() -> i32 {
     cli::run()
+}
+
+/// Run the Windows drag-and-drop helper.
+///
+/// This entry point is public only so the optional binary target can call it.
+#[cfg(feature = "windows-drop")]
+#[doc(hidden)]
+pub fn run_drop_cli() -> i32 {
+    drop_mode::run()
 }
 
 #[cfg(test)]

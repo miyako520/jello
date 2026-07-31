@@ -16,6 +16,14 @@ exclude = ["/.github/"]
 name = "jello"
 path = "src/lib.rs"
 
+[features]
+windows-drop = []
+
 [[bin]]
 name = "jello"
 path = "src/main.rs"
+
+[[bin]]
+name = "jello-drop"
+path = "src/drop_main.rs"
+required-features = ["windows-drop"]
