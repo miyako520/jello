@@ -1,0 +1,25 @@
+CHANGELOG.md
+  s_d00eb2b6d40d10::t_7f1fbe9e3b2c4e 9-10,77-78
+Cargo.lock
+  s_d00eb2b6d40d10::t_6946bc1aa52d1f 7
+Cargo.toml
+  s_d00eb2b6d40d10::t_013f663a9f5e7b 3
+tests/cli.rs
+  s_d00eb2b6d40d10::t_d5ec9416d98d2e 83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "2ff22c892940c46a99c13811a0fd149a9442ec1c",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
