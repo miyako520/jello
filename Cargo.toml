@@ -1,6 +1,6 @@
 [package]
 name = "jello"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.73"
 description = "A handwritten JSON formatter, validator, and conservative repair CLI."
@@ -10,7 +10,7 @@ repository = "https://github.com/miyako520/jello"
 homepage = "https://github.com/miyako520/jello"
 keywords = ["json", "json5", "formatter", "repair", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.github/"]
+exclude = ["/.github/", "/crates/jello-gui/", "/test jello/"]
 
 [lib]
 name = "jello"

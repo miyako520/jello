@@ -48,11 +48,36 @@ jobs:
       - name: Check minimum supported Rust
         run: cargo +1.73.0 check --all-targets --all-features --locked
 
+  windows-gui:
+    name: Windows desktop GUI
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+      - name: Check GUI minimum supported Rust
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          cargo +1.92.0 check --manifest-path crates/jello-gui/Cargo.toml --all-targets --locked
+      - name: Check GUI formatting
+        run: cargo fmt --manifest-path crates/jello-gui/Cargo.toml --all --check
+      - name: Run GUI Clippy
+        run: cargo clippy --manifest-path crates/jello-gui/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Run GUI tests
+        run: cargo test --manifest-path crates/jello-gui/Cargo.toml --all-targets --locked
+      - name: Build GUI release binary
+        run: cargo build --manifest-path crates/jello-gui/Cargo.toml --release --locked
+
+
   package-smoke:
     name: package and binary smoke test
     needs:
       - stable
       - msrv
+      - windows-gui
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
