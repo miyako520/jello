@@ -33,6 +33,26 @@ This creates `data.fixed.json`. If that name already exists, Jello uses
 does not create an output file. The new file inherits the source file's
 ordinary permissions.
 
+### Windows drag and drop
+
+Windows release archives also include `jello-drop.exe`. Drag one or more JSON
+files onto it to repair and format every file in one step. Each successful
+result is saved beside its source as a new `.fixed` file; source files are
+never changed. The terminal reports progress and a final summary without
+printing the full JSON documents.
+
+On first use, choose English or Chinese. Jello remembers the choice in
+`%LOCALAPPDATA%\Jello\config`. Double-click `jello-drop.exe` without dragging
+files to change the language or view the instructions. A one-run language
+override is also available:
+
+```powershell
+jello-drop.exe --lang zh data.json
+```
+
+A mixed batch continues after an individual failure. The exit code is `1` if
+any file has a content error and `2` if any file has an I/O error.
+
 Format stdin or a file:
 
 ```powershell
@@ -179,8 +199,8 @@ input.
 
 ```powershell
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets --locked
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features --locked
 cargo package --locked
 ```
 

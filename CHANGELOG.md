@@ -6,6 +6,21 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Added the optional Windows `jello-drop.exe` helper for processing one or
+  more dragged JSON files with the same conservative JSON5 repair and safe
+  non-overwriting `.fixed` output used by `jello easy`.
+- Added a first-run English/Chinese chooser, persisted per-user language
+  setting, one-run `--lang` override, no-file settings menu, per-file progress,
+  mixed-batch continuation, and localized summaries.
+
+### Changed
+
+- Added a no-overwrite Windows move fallback when the filesystem does not
+  support hard links, allowing `jello easy` and `jello-drop.exe` to publish
+  `.fixed` files on locations such as exFAT volumes and compatible shares.
+
 ## [0.1.1] - 2026-07-30
 
 ### Added

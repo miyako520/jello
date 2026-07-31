@@ -280,7 +280,7 @@ pub fn render_diagnostic(
     out
 }
 
-fn escape_terminal_text(text: &str) -> String {
+pub(crate) fn escape_terminal_text(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
         push_terminal_safe_char(&mut escaped, ch);
