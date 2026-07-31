@@ -1,0 +1,42 @@
+src/lib.rs
+  s_d00eb2b6d40d10::t_b2c89804185a85 6-7
+  s_d00eb2b6d40d10::t_4d7c90f192e1f7 116-124
+src/cli.rs
+  s_d00eb2b6d40d10::t_8459cb603fbc69 21-22,58-60,64-66,117-123,756-933,951-971,989-990,992-1001,1353-1513
+tests/drop_cli.rs
+  s_d00eb2b6d40d10::t_af501a373a6011 1-43
+CHANGELOG.md
+  s_d00eb2b6d40d10::t_8b54507bacbbe0 9
+  s_d00eb2b6d40d10::t_ab2391021c4634 10-15
+  s_d00eb2b6d40d10::t_855b7673884317 16-23
+src/drop_main.rs
+  s_d00eb2b6d40d10::t_d019d40bbacaea 1-3
+src/drop_mode.rs
+  s_d00eb2b6d40d10::t_aceba555c5f447 1-926
+.github/workflows/ci.yml
+  s_d00eb2b6d40d10::t_026bacda32bca4 35,37,39,49
+.github/workflows/release.yml
+  s_d00eb2b6d40d10::t_6b0e916108e50c 41,43,93,95-97,103
+Cargo.toml
+  s_d00eb2b6d40d10::t_a823834e6f3cfa 19-21,25-29
+README.md
+  s_d00eb2b6d40d10::t_b14115df00a3b2 36-55,202-203
+src/diagnostic.rs
+  s_d00eb2b6d40d10::t_00b9a3d9b94bcb 283
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "486bd057b68971ce88b3abc8b34aeee1015a5ff6",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
