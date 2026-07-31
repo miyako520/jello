@@ -80,7 +80,7 @@ fn version_reports_package_version() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout was not UTF-8"),
-        "jello 0.1.1\n"
+        "jello 0.1.2\n"
     );
     assert!(output.stderr.is_empty());
 }
