@@ -33,6 +33,23 @@ This creates `data.fixed.json`. If that name already exists, Jello uses
 does not create an output file. The new file inherits the source file's
 ordinary permissions.
 
+### Windows desktop app
+
+Windows release archives include `jello-gui.exe` for a visual, single-file
+workflow. Open a JSON or JSON5 file, or drag one into the window. If several
+files are dropped together, the GUI opens the first and directs batch work to
+`jello-drop.exe`. The source remains editable on the left while strict,
+formatted JSON updates on the right after a short pause. Problems, applied
+repairs, and optional JSON Schema results appear in the collapsible panel below
+the editors.
+
+`Save .fixed` creates a new file beside the source, and `Save As` writes to a
+new path you choose. Neither action overwrites an existing file. The toolbar
+can load a local JSON Schema Draft 2020-12 document; relative references are
+limited to files inside that schema's directory and network references are
+blocked. English is the default interface language, with Chinese available
+from the language selector.
+
 ### Windows drag and drop
 
 Windows release archives also include `jello-drop.exe`. Drag one or more JSON
@@ -202,10 +219,22 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features --locked
 cargo package --locked
+cargo fmt --manifest-path crates/jello-gui/Cargo.toml --all --check
+cargo clippy --manifest-path crates/jello-gui/Cargo.toml --all-targets --locked -- -D warnings
+cargo test --manifest-path crates/jello-gui/Cargo.toml --all-targets --locked
+cargo build --manifest-path crates/jello-gui/Cargo.toml --release --locked
 ```
 
-CI runs these checks on Linux, macOS, Windows, and Rust 1.73.
+CI runs the core checks on Linux, macOS, Windows, and Rust 1.73. Building the
+desktop application from source requires Rust 1.92 because its `eframe` 0.35
+dependency requires that toolchain; CI checks that minimum separately and
+release-builds the GUI on Windows. Users of `jello-gui.exe` do not need Rust
+installed.
 
 ## License
 
 MIT
+
+The Windows desktop application embeds Noto Sans CJK SC under the SIL Open
+Font License 1.1. A copy of the font license is included with the Windows
+release archive and in `crates/jello-gui/assets/NotoSansCJK-LICENSE.txt`.

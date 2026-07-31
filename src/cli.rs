@@ -11,13 +11,16 @@ use crate::diagnostic::{
 use crate::fixer;
 use crate::formatter::{format_json_with_options, FormatError, FormatOptions};
 use crate::lexer::InputMode;
+#[cfg(any(feature = "windows-drop", test))]
+use crate::output::CleanupWarning;
+use crate::output::{save_fixed, SavedOutput};
 use crate::parser::{parse_with_mode, MAX_INPUT_BYTES};
 use crate::stats::Stats;
 #[cfg(windows)]
 use std::ffi::c_void;
 #[cfg(windows)]
 use std::mem::MaybeUninit;
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
@@ -53,18 +56,10 @@ struct InputData {
     source: String,
     snapshot: Option<FileSnapshot>,
 }
+#[cfg(any(feature = "windows-drop", test))]
+pub(crate) type EasyCleanupWarning = CleanupWarning;
 
-#[derive(Debug)]
-pub(crate) struct EasyOutput {
-    pub(crate) path: PathBuf,
-    pub(crate) cleanup_warning: Option<EasyCleanupWarning>,
-}
-
-#[derive(Debug)]
-pub(crate) struct EasyCleanupWarning {
-    pub(crate) path: PathBuf,
-    pub(crate) error: io::Error,
-}
+pub(crate) type EasyOutput = SavedOutput;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileSnapshot {
@@ -114,7 +109,9 @@ extern "system" {
         file: *mut c_void,
         information: *mut WindowsFileInformation,
     ) -> i32;
+    #[cfg(test)]
     fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    #[cfg(test)]
     fn GetFullPathNameW(
         file_name: *const u16,
         buffer_length: u32,
@@ -753,6 +750,7 @@ fn read_limited<R: Read>(mut reader: R) -> Result<String, InputError> {
     })
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EasyPublish {
     Linked,
@@ -760,12 +758,14 @@ enum EasyPublish {
     Moved,
 }
 
+#[cfg(test)]
 #[cfg(not(windows))]
 fn publish_easy_candidate(temporary: &Path, candidate: &Path) -> io::Result<EasyPublish> {
     fs::hard_link(temporary, candidate)?;
     Ok(EasyPublish::Linked)
 }
 
+#[cfg(test)]
 #[cfg(windows)]
 fn publish_easy_candidate(temporary: &Path, candidate: &Path) -> io::Result<EasyPublish> {
     publish_easy_candidate_with(
@@ -776,6 +776,7 @@ fn publish_easy_candidate(temporary: &Path, candidate: &Path) -> io::Result<Easy
     )
 }
 
+#[cfg(test)]
 #[cfg(windows)]
 fn publish_easy_candidate_with<H, M>(
     temporary: &Path,
@@ -802,6 +803,7 @@ where
     }
 }
 
+#[cfg(test)]
 #[cfg(windows)]
 fn windows_move_no_replace(temporary: &Path, candidate: &Path) -> io::Result<()> {
     const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
@@ -844,6 +846,7 @@ fn windows_move_no_replace(temporary: &Path, candidate: &Path) -> io::Result<()>
     }
 }
 
+#[cfg(test)]
 #[cfg(windows)]
 fn windows_full_path(path: &Path) -> io::Result<PathBuf> {
     let input = windows_null_terminated(path.as_os_str().encode_wide())?;
@@ -884,6 +887,7 @@ fn windows_full_path(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
+#[cfg(test)]
 #[cfg(windows)]
 fn windows_verbatim_path(path: &Path) -> io::Result<Vec<u16>> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -914,6 +918,7 @@ fn windows_verbatim_path(path: &Path) -> io::Result<Vec<u16>> {
     Ok(output)
 }
 
+#[cfg(test)]
 #[cfg(windows)]
 fn windows_null_terminated<I>(wide: I) -> io::Result<Vec<u16>>
 where
@@ -931,14 +936,10 @@ where
 }
 
 pub(crate) fn write_easy_output(path: &Path, contents: &[u8]) -> io::Result<EasyOutput> {
-    write_easy_output_with(
-        path,
-        contents,
-        |file, contents| file.write_all(contents),
-        |path| fs::remove_file(path),
-    )
+    save_fixed(path, contents)
 }
 
+#[cfg(test)]
 fn write_easy_output_with<F, R>(
     path: &Path,
     contents: &[u8],
@@ -958,6 +959,7 @@ where
     )
 }
 
+#[cfg(test)]
 fn write_easy_output_with_publish<F, R, P>(
     path: &Path,
     contents: &[u8],
@@ -1018,6 +1020,7 @@ where
     ))
 }
 
+#[cfg(test)]
 fn remove_easy_temporary(path: &Path, error: io::Error) -> io::Error {
     match fs::remove_file(path) {
         Ok(()) => error,
@@ -1031,6 +1034,7 @@ fn remove_easy_temporary(path: &Path, error: io::Error) -> io::Error {
     }
 }
 
+#[cfg(test)]
 fn easy_output_path(path: &Path, attempt: usize) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut name = OsString::from(
