@@ -1,0 +1,34 @@
+src/lib.rs
+  s_d00eb2b6d40d10::t_74a10d0a4dc7dd 214-219
+  s_d00eb2b6d40d10::t_b7ed63696b4399 95-99,103
+  s_d00eb2b6d40d10::t_2db2ff20cb5b92 26-28,100-102
+  s_d00eb2b6d40d10::t_3a51f06613da18 200,236-266
+  s_d00eb2b6d40d10::t_b28c855b93d3a6 201-213,220-235
+  s_d00eb2b6d40d10::t_5d71708727e939 267-279
+  s_d00eb2b6d40d10::t_8939a78a9f3b3b 104
+src/repair_plan.rs
+  s_d00eb2b6d40d10::t_42ef39ce091ecc 238,251,256
+  s_d00eb2b6d40d10::t_7486e3fb918ac2 602,604-606,646-657,661-690,692-695
+  s_d00eb2b6d40d10::t_0ad7c48416d0f9 589-590,632-642
+  s_d00eb2b6d40d10::t_2db2ff20cb5b92 205,567-588,591-601,603,607-631,643-645,658-660,696-721
+  s_d00eb2b6d40d10::t_f0b3c6b2a0ff6b 7,144,162-169,194-204,348,350-352,354-355,358-359,362,368-372,375,377-381,383-389,391-396,477,484-485,487-490,492,496,508,510,516-518,520,522-536,540-544
+  s_d00eb2b6d40d10::t_ec41d723d06439 691
+  s_d00eb2b6d40d10::t_cce150c7cadfea 934-946
+  s_d00eb2b6d40d10::t_e198fe9cd6fa84 206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7024d0234fc3043fb3a6fe43d61868902a6bf6f5",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
