@@ -201,6 +201,22 @@ impl RecordedRepair {
         self.decision_scope = scope;
         self
     }
+
+    pub(crate) const fn span(&self) -> Span {
+        self.span
+    }
+
+    pub(crate) const fn description(&self) -> &'static str {
+        self.description
+    }
+
+    pub(crate) fn byte_range(&self) -> Range<usize> {
+        self.byte_range.clone()
+    }
+
+    pub(crate) fn replacement(&self) -> &str {
+        &self.replacement
+    }
 }
 
 impl RepairPlan {

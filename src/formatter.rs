@@ -254,6 +254,12 @@ fn write_string(input: &str, out: &mut LimitedOutput) -> Result<(), FormatError>
     out.push_char('"')
 }
 
+pub(crate) fn json_string_literal(input: &str) -> Result<String, FormatError> {
+    let mut out = LimitedOutput::new(MAX_OUTPUT_BYTES);
+    write_string(input, &mut out)?;
+    Ok(out.finish())
+}
+
 fn write_unicode_escape(value: char, out: &mut LimitedOutput) -> Result<(), FormatError> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let code = value as u32;
@@ -287,6 +293,14 @@ mod tests {
         assert_eq!(
             format_json_with_options(&object(), FormatOptions::compact()).unwrap(),
             r#"{"name":"Ada","ok":true}"#
+        );
+    }
+
+    #[test]
+    fn json_string_literal_uses_strict_json_escaping() {
+        assert_eq!(
+            json_string_literal("line\u{2028}\"break").unwrap(),
+            r#""line\u2028\"break""#
         );
     }
 

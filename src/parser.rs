@@ -56,7 +56,7 @@ fn parse_internal(
     }
     let edits = lex_edits
         .into_iter()
-        .map(|edit| FixEdit::at("F005", edit.description, edit.position))
+        .map(|record| FixEdit::at("F005", record.description(), record.span().start))
         .collect();
 
     let mut parser = Parser {

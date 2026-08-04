@@ -1,4 +1,7 @@
+use std::ops::Range;
+
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::repair_plan::{RecordedRepair, RepairKind};
 use crate::span::{Position, Span};
 
 pub const MAX_DIAGNOSTICS: usize = 64;
@@ -34,12 +37,6 @@ pub struct Token {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LexEdit {
-    pub(crate) position: Position,
-    pub(crate) description: &'static str,
-}
-
 #[cfg(test)]
 fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
     lex_with_mode(source, InputMode::Json)
@@ -53,7 +50,7 @@ pub fn lex_with_mode(source: &str, mode: InputMode) -> (Vec<Token>, Vec<Diagnost
 pub(crate) fn lex_for_repair(
     source: &str,
     mode: InputMode,
-) -> (Vec<Token>, Vec<Diagnostic>, Vec<LexEdit>) {
+) -> (Vec<Token>, Vec<Diagnostic>, Vec<RecordedRepair>) {
     Lexer::new(source, mode, true).lex()
 }
 
@@ -67,7 +64,7 @@ struct Lexer<'a> {
     previous_was_cr: bool,
     diagnostics: Vec<Diagnostic>,
     audit_normalizations: bool,
-    edits: Vec<LexEdit>,
+    edits: Vec<RecordedRepair>,
 }
 
 impl<'a> Lexer<'a> {
@@ -86,7 +83,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex(mut self) -> (Vec<Token>, Vec<Diagnostic>, Vec<LexEdit>) {
+    fn lex(mut self) -> (Vec<Token>, Vec<Diagnostic>, Vec<RecordedRepair>) {
         if self
             .diagnostics
             .try_reserve_exact(MAX_DIAGNOSTICS + 1)
@@ -229,45 +226,56 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_whitespace(&mut self) {
-        let mut normalization = None;
+        let start = self.position();
+        let start_index = self.index;
+        let mut normalization = false;
         while let Some(ch) = self.peek() {
             if !is_whitespace(ch, self.mode) {
                 break;
             }
-            if self.mode == InputMode::Json5
-                && !is_whitespace(ch, InputMode::Json)
-                && normalization.is_none()
-            {
-                normalization = Some(self.position());
+            if self.mode == InputMode::Json5 && !is_whitespace(ch, InputMode::Json) {
+                normalization = true;
             }
             self.bump();
         }
-        if let Some(position) = normalization {
-            self.record_normalization(position, "removed JSON5-only whitespace");
+        if normalization {
+            self.record_normalization(
+                Span::new(start, self.position()),
+                start_index..self.index,
+                "",
+                "removed JSON5-only whitespace",
+            );
         }
     }
     fn lex_comment(&mut self) {
         let start = self.position();
+        let start_index = self.index;
         self.bump();
         match self.peek() {
             Some('/') => {
                 self.bump();
-                self.record_normalization(start, "removed JSON5 line comment");
                 while !matches!(
                     self.peek(),
                     None | Some('\n' | '\r' | '\u{2028}' | '\u{2029}')
                 ) {
                     self.bump();
                 }
+                self.record_normalization(
+                    Span::new(start, self.position()),
+                    start_index..self.index,
+                    "",
+                    "removed JSON5 line comment",
+                );
             }
             Some('*') => {
                 self.bump();
-                self.record_normalization(start, "removed JSON5 block comment");
+                let mut terminated = false;
                 loop {
                     match (self.peek(), self.peek_next()) {
                         (Some('*'), Some('/')) => {
                             self.bump();
                             self.bump();
+                            terminated = true;
                             break;
                         }
                         (Some(_), _) => {
@@ -282,6 +290,14 @@ impl<'a> Lexer<'a> {
                             break;
                         }
                     }
+                }
+                if terminated {
+                    self.record_normalization(
+                        Span::new(start, self.position()),
+                        start_index..self.index,
+                        "",
+                        "removed JSON5 block comment",
+                    );
                 }
             }
             _ => {
@@ -340,13 +356,16 @@ impl<'a> Lexer<'a> {
                 }
                 '\\' => {
                     let escape_start = self.position();
+                    let escape_start_index = self.index;
                     self.bump();
                     match self.bump() {
                         Some('"') => value.push('"'),
                         Some('\'') if self.mode == InputMode::Json5 => {
                             if quote == '"' {
                                 self.record_normalization(
-                                    escape_start,
+                                    Span::new(escape_start, self.position()),
+                                    escape_start_index..self.index,
+                                    "'",
                                     "normalized JSON5 apostrophe escape",
                                 );
                             }
@@ -361,7 +380,9 @@ impl<'a> Lexer<'a> {
                         Some('t') => value.push('\t'),
                         Some('\n' | '\u{2028}' | '\u{2029}') if self.mode == InputMode::Json5 => {
                             self.record_normalization(
-                                escape_start,
+                                Span::new(escape_start, self.position()),
+                                escape_start_index..self.index,
+                                "",
                                 "removed JSON5 string line continuation",
                             );
                         }
@@ -370,7 +391,9 @@ impl<'a> Lexer<'a> {
                                 self.bump();
                             }
                             self.record_normalization(
-                                escape_start,
+                                Span::new(escape_start, self.position()),
+                                escape_start_index..self.index,
+                                "",
                                 "removed JSON5 string line continuation",
                             );
                         }
@@ -410,13 +433,20 @@ impl<'a> Lexer<'a> {
                     return;
                 }
                 separator @ ('\u{2028}' | '\u{2029}') => {
-                    let position = self.position();
-                    self.record_normalization(
-                        position,
-                        "escaped Unicode line separator in formatted output",
-                    );
+                    let separator_start = self.position();
+                    let separator_start_index = self.index;
                     value.push(separator);
                     self.bump();
+                    self.record_normalization(
+                        Span::new(separator_start, self.position()),
+                        separator_start_index..self.index,
+                        match separator {
+                            '\u{2028}' => "\\u2028",
+                            '\u{2029}' => "\\u2029",
+                            _ => unreachable!(),
+                        },
+                        "escaped Unicode line separator in formatted output",
+                    );
                 }
                 other => {
                     value.push(other);
@@ -541,7 +571,12 @@ impl<'a> Lexer<'a> {
             } else {
                 value.to_string()
             };
-            self.record_normalization(start, "normalized JSON5 hexadecimal number");
+            self.record_normalization(
+                Span::new(start, self.position()),
+                start_index..self.index,
+                &text,
+                "normalized JSON5 hexadecimal number",
+            );
             self.tokens.push(Token {
                 kind: TokenKind::Number(text),
                 span: Span::new(start, self.position()),
@@ -621,7 +656,12 @@ impl<'a> Lexer<'a> {
             }
         }
         if text.as_str() != &self.source[start_index..self.index] {
-            self.record_normalization(start, "normalized JSON5 number");
+            self.record_normalization(
+                Span::new(start, self.position()),
+                start_index..self.index,
+                &text,
+                "normalized JSON5 number",
+            );
         }
         self.tokens.push(Token {
             kind: TokenKind::Number(text),
@@ -629,7 +669,13 @@ impl<'a> Lexer<'a> {
         });
     }
 
-    fn record_normalization(&mut self, position: Position, description: &'static str) {
+    fn record_normalization(
+        &mut self,
+        span: Span,
+        byte_range: Range<usize>,
+        replacement: &str,
+        description: &'static str,
+    ) {
         if !self.audit_normalizations {
             return;
         }
@@ -639,15 +685,34 @@ impl<'a> Lexer<'a> {
                 DiagnosticKind::TooManyRepairs {
                     max_repairs: MAX_REPAIR_EDITS,
                 },
-                Some(Span::new(position, position)),
+                Some(span),
             ));
             self.audit_normalizations = false;
             return;
         }
-        self.edits.push(LexEdit {
-            position,
+        let mut replacement_text = String::new();
+        if replacement_text
+            .try_reserve_exact(replacement.len())
+            .is_err()
+            || self.edits.try_reserve(1).is_err()
+        {
+            self.diagnostics.push(Diagnostic::new(
+                "E020",
+                DiagnosticKind::AllocationFailed,
+                Some(span),
+            ));
+            self.audit_normalizations = false;
+            return;
+        }
+        replacement_text.push_str(replacement);
+        self.edits.push(RecordedRepair::replace(
+            RepairKind::Json5Normalization,
+            "F005",
             description,
-        });
+            span,
+            byte_range,
+            replacement_text,
+        ));
     }
 
     fn invalid_number(&mut self, start: Position) {
@@ -920,6 +985,39 @@ mod tests {
                 .iter()
                 .any(|token| token.kind == TokenKind::String("ab".into())));
         }
+    }
+
+    #[test]
+    fn repair_lexer_records_exact_json5_normalizations() {
+        let cases = [
+            ("{\u{00a0}\"a\":1}", "\u{00a0}", ""),
+            ("{/*x*/\"a\":1}", "/*x*/", ""),
+            ("{\"a\":0x10}", "0x10", "16"),
+            ("{\"a\":+2}", "+2", "2"),
+            ("{\"a\":.5}", ".5", "0.5"),
+            (r#"{"a":"it\'s"}"#, r#"\'"#, "'"),
+        ];
+        for (source, before, after) in cases {
+            let (_, diagnostics, records) = lex_for_repair(source, InputMode::Json5);
+            assert!(diagnostics.is_empty(), "{source}");
+            assert!(
+                records.iter().any(|record| {
+                    &source[record.byte_range()] == before && record.replacement() == after
+                }),
+                "missing exact record for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_lexer_records_a_string_line_continuation_as_one_range() {
+        let source = "\"a\\\nb\"";
+        let (_, diagnostics, records) = lex_for_repair(source, InputMode::Json5);
+
+        assert!(diagnostics.is_empty());
+        assert!(records.iter().any(|record| {
+            &source[record.byte_range()] == "\\\n" && record.replacement().is_empty()
+        }));
     }
 
     #[test]
