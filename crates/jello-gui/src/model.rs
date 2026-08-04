@@ -119,6 +119,13 @@ impl AppModel {
         } = result;
         match (plan, evaluation) {
             (Some(plan), Some(evaluation)) if selection_version == 0 => {
+                if self
+                    .review
+                    .as_ref()
+                    .is_some_and(|review| selection_version != review.selection_version())
+                {
+                    return false;
+                }
                 self.preview = evaluation_preview(&evaluation);
                 let selection = plan.default_selection();
                 self.review = Some(ReviewState::new(plan, selection, evaluation));
@@ -426,6 +433,58 @@ mod tests {
         );
         assert_eq!(review.selection_version(), 2);
         assert!(review.evaluation_pending());
+    }
+
+    #[test]
+    fn delayed_analyze_result_preserves_newer_same_generation_selection() {
+        let now = Instant::now();
+        let mut model = AppModel::default();
+        assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
+        let decision_set = model.review.as_ref().unwrap().plan().decision_sets()[0].id();
+        model.select_schema("schema.json".into());
+
+        let AnalysisRequest::Analyze { generation: 1, .. } =
+            model.take_analysis_request(now).unwrap()
+        else {
+            panic!("schema changes must queue a new analysis generation");
+        };
+        assert!(model.decide_repair(decision_set, RepairDecision::Accepted));
+
+        assert!(!model.apply_result(analyzed_result("{name:'Ada'}", 1)));
+        let review = model.review.as_ref().unwrap();
+        assert_eq!(review.selection_version(), 1);
+        assert_eq!(
+            review.selection().decision(decision_set),
+            Some(RepairDecision::Accepted)
+        );
+
+        let AnalysisRequest::Evaluate {
+            generation,
+            selection_version,
+            plan,
+            selection,
+            ..
+        } = model.take_analysis_request(now).unwrap()
+        else {
+            panic!("rejecting delayed analysis must preserve queued evaluation");
+        };
+        let evaluation = plan.evaluate(&selection);
+        assert!(model.apply_result(AnalysisResult {
+            generation,
+            selection_version,
+            plan: None,
+            evaluation: Some(evaluation),
+            diagnostics: Vec::new(),
+            schema_state: SchemaState::Valid,
+        }));
+        let review = model.review.as_ref().unwrap();
+        assert_eq!(review.selection_version(), 1);
+        assert_eq!(
+            review.selection().decision(decision_set),
+            Some(RepairDecision::Accepted)
+        );
+        assert!(!review.evaluation_pending());
+        assert!(matches!(model.schema_state, SchemaState::Valid));
     }
 
     #[test]
