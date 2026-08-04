@@ -56,7 +56,7 @@ fn parse_internal(
     }
     let edits = lex_edits
         .into_iter()
-        .map(|record| FixEdit::at("F005", record.description(), record.span().start))
+        .map(|record| FixEdit::at("F005", record.description(), record.audit_position()))
         .collect();
 
     let mut parser = Parser {
@@ -433,6 +433,7 @@ mod tests {
     use super::*;
     use crate::formatter::format_json;
     use crate::lexer::InputMode;
+    use crate::span::Position;
 
     #[test]
     fn parses_nested_json() {
@@ -547,5 +548,29 @@ mod tests {
             parse_repair("{a: 1 true: 2 false: 3 null: 4}", InputMode::Json5).unwrap();
         assert!(matches!(parsed, Value::Object(_)));
         assert_eq!(edits.iter().filter(|edit| edit.code == "F004").count(), 3);
+    }
+
+    #[test]
+    fn json5_whitespace_audit_keeps_the_first_non_json_whitespace_position() {
+        let source = "{ \u{00a0}\"a\":1}";
+        let (_, diagnostics, records) = lex_for_repair(source, InputMode::Json5);
+        let (_, edits) = parse_repair(source, InputMode::Json5).unwrap();
+
+        assert!(diagnostics.is_empty());
+        let record = records
+            .iter()
+            .find(|record| record.replacement().is_empty())
+            .unwrap();
+        assert_eq!(record.byte_range(), 1..4);
+        assert_eq!(record.span().start, Position::new(1, 1, 2));
+        assert_eq!(record.span().end, Position::new(4, 1, 4));
+
+        let audit = edits
+            .iter()
+            .find(|edit| edit.code == "F005" && edit.description.contains("whitespace"))
+            .unwrap();
+        assert_eq!(audit.byte, 2);
+        assert_eq!(audit.line, 1);
+        assert_eq!(audit.column, 3);
     }
 }

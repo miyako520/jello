@@ -6,7 +6,7 @@ use crate::fixer::FixEdit;
 use crate::formatter::{self, FormatError, MAX_OUTPUT_BYTES};
 use crate::lexer::MAX_REPAIR_EDITS;
 use crate::parser::{self, MAX_INPUT_BYTES};
-use crate::span::Span;
+use crate::span::{Position, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RepairGroupId(pub(crate) usize);
@@ -172,6 +172,7 @@ pub(crate) struct RecordedRepair {
     code: &'static str,
     description: &'static str,
     span: Span,
+    audit_position: Position,
     byte_range: Range<usize>,
     decision_scope: Range<usize>,
     replacement: String,
@@ -191,6 +192,7 @@ impl RecordedRepair {
             code,
             description,
             span,
+            audit_position: span.start,
             decision_scope: byte_range.clone(),
             byte_range,
             replacement,
@@ -202,8 +204,17 @@ impl RecordedRepair {
         self
     }
 
+    pub(crate) fn with_audit_position(mut self, audit_position: Position) -> Self {
+        self.audit_position = audit_position;
+        self
+    }
+
     pub(crate) const fn span(&self) -> Span {
         self.span
+    }
+
+    pub(crate) const fn audit_position(&self) -> Position {
+        self.audit_position
     }
 
     pub(crate) const fn description(&self) -> &'static str {

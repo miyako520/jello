@@ -228,22 +228,23 @@ impl<'a> Lexer<'a> {
     fn lex_whitespace(&mut self) {
         let start = self.position();
         let start_index = self.index;
-        let mut normalization = false;
+        let mut audit_position = None;
         while let Some(ch) = self.peek() {
             if !is_whitespace(ch, self.mode) {
                 break;
             }
             if self.mode == InputMode::Json5 && !is_whitespace(ch, InputMode::Json) {
-                normalization = true;
+                audit_position.get_or_insert(self.position());
             }
             self.bump();
         }
-        if normalization {
+        if let Some(audit_position) = audit_position {
             self.record_normalization(
                 Span::new(start, self.position()),
                 start_index..self.index,
                 "",
                 "removed JSON5-only whitespace",
+                audit_position,
             );
         }
     }
@@ -265,6 +266,7 @@ impl<'a> Lexer<'a> {
                     start_index..self.index,
                     "",
                     "removed JSON5 line comment",
+                    start,
                 );
             }
             Some('*') => {
@@ -297,6 +299,7 @@ impl<'a> Lexer<'a> {
                         start_index..self.index,
                         "",
                         "removed JSON5 block comment",
+                        start,
                     );
                 }
             }
@@ -367,6 +370,7 @@ impl<'a> Lexer<'a> {
                                     escape_start_index..self.index,
                                     "'",
                                     "normalized JSON5 apostrophe escape",
+                                    escape_start,
                                 );
                             }
                             value.push('\'');
@@ -384,6 +388,7 @@ impl<'a> Lexer<'a> {
                                 escape_start_index..self.index,
                                 "",
                                 "removed JSON5 string line continuation",
+                                escape_start,
                             );
                         }
                         Some('\r') if self.mode == InputMode::Json5 => {
@@ -395,6 +400,7 @@ impl<'a> Lexer<'a> {
                                 escape_start_index..self.index,
                                 "",
                                 "removed JSON5 string line continuation",
+                                escape_start,
                             );
                         }
                         Some('u') => match self.read_unicode_escape() {
@@ -446,6 +452,7 @@ impl<'a> Lexer<'a> {
                             _ => unreachable!(),
                         },
                         "escaped Unicode line separator in formatted output",
+                        separator_start,
                     );
                 }
                 other => {
@@ -576,6 +583,7 @@ impl<'a> Lexer<'a> {
                 start_index..self.index,
                 &text,
                 "normalized JSON5 hexadecimal number",
+                start,
             );
             self.tokens.push(Token {
                 kind: TokenKind::Number(text),
@@ -661,6 +669,7 @@ impl<'a> Lexer<'a> {
                 start_index..self.index,
                 &text,
                 "normalized JSON5 number",
+                start,
             );
         }
         self.tokens.push(Token {
@@ -675,6 +684,7 @@ impl<'a> Lexer<'a> {
         byte_range: Range<usize>,
         replacement: &str,
         description: &'static str,
+        audit_position: Position,
     ) {
         if !self.audit_normalizations {
             return;
@@ -705,14 +715,17 @@ impl<'a> Lexer<'a> {
             return;
         }
         replacement_text.push_str(replacement);
-        self.edits.push(RecordedRepair::replace(
-            RepairKind::Json5Normalization,
-            "F005",
-            description,
-            span,
-            byte_range,
-            replacement_text,
-        ));
+        self.edits.push(
+            RecordedRepair::replace(
+                RepairKind::Json5Normalization,
+                "F005",
+                description,
+                span,
+                byte_range,
+                replacement_text,
+            )
+            .with_audit_position(audit_position),
+        );
     }
 
     fn invalid_number(&mut self, start: Position) {
