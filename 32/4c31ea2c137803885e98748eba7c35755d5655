@@ -1,0 +1,27 @@
+crates/jello-gui/src/model.rs
+  s_d00eb2b6d40d10::t_4ccc120232f710 20,38,57,72-74,112
+  s_d00eb2b6d40d10::t_a82ab18dc678f4 7
+  s_d00eb2b6d40d10::t_39ebacf5a5c001 129-133,218-262
+crates/jello-gui/src/review.rs
+  s_d00eb2b6d40d10::t_4ccc120232f710 117-146,148
+  s_d00eb2b6d40d10::t_a82ab18dc678f4 1-7,9-18,20-116
+  s_d00eb2b6d40d10::t_dceae3287c91b9 8,19,147
+crates/jello-gui/src/lib.rs
+  s_d00eb2b6d40d10::t_dac3fd2e0dead9 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "324c31ea2c137803885e98748eba7c35755d5655",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
