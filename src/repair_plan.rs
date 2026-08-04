@@ -242,21 +242,32 @@ impl RepairPlan {
                         .cmp(&records[*right].decision_scope.end),
                 )
         });
-        let mut active: Option<usize> = None;
+        let mut active_non_zero: Option<usize> = None;
+        let mut previous_zero: Option<usize> = None;
         for index in scopes {
-            if let Some(previous) = active {
-                if scopes_overlap(
+            if records[index].decision_scope.is_empty() {
+                if let Some(previous) = previous_zero {
+                    if records[previous].decision_scope == records[index].decision_scope {
+                        union(&mut parents, previous, index);
+                    }
+                }
+                previous_zero = Some(index);
+                continue;
+            }
+            previous_zero = None;
+            if let Some(previous) = active_non_zero {
+                if ranges_overlap(
                     &records[previous].decision_scope,
                     &records[index].decision_scope,
                 ) {
                     union(&mut parents, previous, index);
-                    if records[index].decision_scope.end > records[previous].decision_scope.end {
-                        active = Some(index);
-                    }
-                    continue;
                 }
+                if records[index].decision_scope.end > records[previous].decision_scope.end {
+                    active_non_zero = Some(index);
+                }
+            } else {
+                active_non_zero = Some(index);
             }
-            active = Some(index);
         }
         let mut root_sets = vec![None; records.len()];
         let mut group_sets = Vec::with_capacity(records.len());
@@ -431,10 +442,6 @@ fn valid_range(source: &str, range: &Range<usize>) -> bool {
 fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
     left.start < right.end && right.start < left.end
 }
-fn scopes_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
-    ranges_overlap(left, right)
-        || (left.start == left.end && right.start == right.end && left.start == right.start)
-}
 fn contains_range(outer: &Range<usize>, inner: &Range<usize>) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
 }
@@ -597,5 +604,45 @@ mod tests {
             RepairPlan::from_records("['li\\\nne']", Vec::new(), vec![outer, inner]).unwrap();
         assert_eq!(plan.groups().len(), 2);
         assert_eq!(plan.decision_sets().len(), 1);
+    }
+
+    #[test]
+    fn zero_width_scope_does_not_split_an_overlapping_scope_component() {
+        let outer = RecordedRepair::replace(
+            RepairKind::SingleQuotedString,
+            "F001",
+            "outer repair",
+            span(0, 1),
+            0..1,
+            "0".to_string(),
+        )
+        .with_decision_scope(0..10);
+        let insertion = RecordedRepair::replace(
+            RepairKind::MissingComma,
+            "F004",
+            "insertion repair",
+            span(5, 5),
+            5..5,
+            ",".to_string(),
+        );
+        let tail = RecordedRepair::replace(
+            RepairKind::Json5Normalization,
+            "F005",
+            "tail repair",
+            span(6, 7),
+            6..7,
+            "6".to_string(),
+        );
+        let plan = RepairPlan::from_records("0123456789", Vec::new(), vec![outer, insertion, tail])
+            .unwrap();
+        assert_eq!(plan.decision_sets().len(), 2);
+        assert_eq!(
+            plan.groups()[0].decision_set(),
+            plan.groups()[2].decision_set()
+        );
+        assert_ne!(
+            plan.groups()[0].decision_set(),
+            plan.groups()[1].decision_set()
+        );
     }
 }
