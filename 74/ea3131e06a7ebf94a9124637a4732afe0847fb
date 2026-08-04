@@ -1,0 +1,25 @@
+src/lexer.rs
+  s_d00eb2b6d40d10::t_62d5c5a8dff9a2 231,237,241,247,269,302,373,391,403,455,586,672,687,718-728
+src/parser.rs
+  s_d00eb2b6d40d10::t_62d5c5a8dff9a2 59,436
+  s_d00eb2b6d40d10::t_e86501f3f8d935 552-575
+src/repair_plan.rs
+  s_d00eb2b6d40d10::t_62d5c5a8dff9a2 9,175,195,207-211,216-218
+  s_d00eb2b6d40d10::t_30bcd8a56ff120 219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "74ea3131e06a7ebf94a9124637a4732afe0847fb",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
