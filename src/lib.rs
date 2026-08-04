@@ -23,8 +23,9 @@ pub use lexer::{MAX_DIAGNOSTICS, MAX_REPAIR_EDITS, MAX_TOKENS};
 pub use output::{save_as_new, save_fixed, CleanupWarning, SavedOutput};
 pub use parser::{MAX_INPUT_BYTES, MAX_NESTING_DEPTH};
 pub use repair_plan::{
-    RepairCandidate, RepairChange, RepairDecision, RepairDecisionSet, RepairDecisionSetId,
-    RepairEvaluation, RepairGroup, RepairGroupId, RepairKind, RepairPlan, RepairSelection,
+    CandidateHighlight, RepairCandidate, RepairChange, RepairDecision, RepairDecisionSet,
+    RepairDecisionSetId, RepairEvaluation, RepairGroup, RepairGroupId, RepairKind, RepairPlan,
+    RepairSelection,
 };
 pub use span::{Position, Span};
 pub use stats::Stats;
@@ -89,6 +90,16 @@ pub fn repair(source: &str) -> RepairOutcome {
 /// Repair structural mistakes and normalize the supported JSON5 subset.
 pub fn repair_json5(source: &str) -> RepairOutcome {
     repair_with_mode(source, InputMode::Json5)
+}
+
+/// Plan conservative repairs for strict RFC 8259 JSON input.
+pub fn plan_repair(source: &str) -> Result<RepairPlan, Vec<Diagnostic>> {
+    fixer::plan(source, InputMode::Json)
+}
+
+/// Plan repairs and normalizations for the supported JSON5 subset.
+pub fn plan_repair_json5(source: &str) -> Result<RepairPlan, Vec<Diagnostic>> {
+    fixer::plan(source, InputMode::Json5)
 }
 
 fn repair_with_mode(source: &str, mode: InputMode) -> RepairOutcome {
@@ -184,6 +195,86 @@ mod tests {
             repair(r#"{"a" 1}"#),
             RepairOutcome::Unrepairable(_)
         ));
+    }
+
+    #[test]
+    fn accepting_a_public_plan_matches_legacy_repair_json5() {
+        let source = "{name:'Ada', values:[0x10,]}";
+        let plan = plan_repair_json5(source).unwrap();
+        let mut selection = plan.default_selection();
+        selection.set_all(RepairDecision::Accepted);
+        let RepairEvaluation::Ready(candidate) = plan.evaluate(&selection) else {
+            panic!("accept-all plan must be ready");
+        };
+        let RepairOutcome::Repaired(legacy) = repair_json5(source) else {
+            panic!("legacy repair must succeed");
+        };
+        assert_eq!(candidate.output, legacy.output);
+        assert_eq!(candidate.edits, legacy.edits);
+    }
+
+    #[test]
+    fn public_strict_plan_does_not_accept_json5_lexical_syntax() {
+        assert!(plan_repair("{name:1}").is_err());
+        assert!(plan_repair_json5("{name:1}").is_ok());
+    }
+
+    #[test]
+    fn candidate_highlights_only_repair_tokens_not_pretty_print_whitespace() {
+        let plan = plan_repair_json5("{name:'Ada'}").unwrap();
+        let RepairEvaluation::Preview(candidate) = plan.evaluate(&plan.default_selection()) else {
+            panic!("new plan must start pending");
+        };
+        assert!(!candidate.highlights.is_empty());
+        for highlight in &candidate.highlights {
+            let text = &candidate.output[highlight.range.clone()];
+            assert!(!text.chars().all(char::is_whitespace));
+        }
+    }
+
+    #[test]
+    fn deletion_highlight_anchors_to_the_next_surviving_token() {
+        let plan = plan_repair_json5("[1,]").unwrap();
+        let RepairEvaluation::Preview(candidate) = plan.evaluate(&plan.default_selection()) else {
+            panic!("new plan must start pending");
+        };
+        let highlight = candidate
+            .highlights
+            .iter()
+            .find(|highlight| {
+                plan.groups()[highlight.group.index()].kind() == RepairKind::TrailingComma
+            })
+            .expect("trailing-comma repair must be highlighted");
+        assert!(highlight.anchor_only);
+        assert_eq!(&candidate.output[highlight.range.clone()], "]");
+    }
+
+    #[test]
+    fn eof_deletion_highlight_anchors_to_the_previous_surviving_token() {
+        let plan = plan_repair_json5("[]// comment").unwrap();
+        let RepairEvaluation::Preview(candidate) = plan.evaluate(&plan.default_selection()) else {
+            panic!("new plan must start pending");
+        };
+        let highlight = candidate
+            .highlights
+            .first()
+            .expect("EOF comment repair must be highlighted");
+        assert!(highlight.anchor_only);
+        assert_eq!(&candidate.output[highlight.range.clone()], "]");
+    }
+
+    #[test]
+    fn deletion_inside_a_surviving_token_anchors_to_that_token() {
+        let plan = plan_repair_json5("[\"a\\\nb\"]").unwrap();
+        let RepairEvaluation::Preview(candidate) = plan.evaluate(&plan.default_selection()) else {
+            panic!("new plan must start pending");
+        };
+        let highlight = candidate
+            .highlights
+            .first()
+            .expect("string continuation repair must be highlighted");
+        assert!(highlight.anchor_only);
+        assert_eq!(&candidate.output[highlight.range.clone()], "\"ab\"");
     }
 
     #[test]

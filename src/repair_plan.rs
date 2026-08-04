@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::fixer::FixEdit;
 use crate::formatter::{self, FormatError, MAX_OUTPUT_BYTES};
-use crate::lexer::MAX_REPAIR_EDITS;
+use crate::lexer::{self, InputMode, Token, TokenKind, MAX_REPAIR_EDITS};
 use crate::parser::{self, MAX_INPUT_BYTES};
 use crate::span::{Position, Span};
 
@@ -141,6 +141,7 @@ struct PlanPatch {
     decision_set: RepairDecisionSetId,
     byte_range: Range<usize>,
     replacement: String,
+    groups: Vec<RepairGroupId>,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +159,14 @@ pub struct RepairPlan {
 pub struct RepairCandidate {
     pub output: String,
     pub edits: Vec<FixEdit>,
+    pub highlights: Vec<CandidateHighlight>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateHighlight {
+    pub group: RepairGroupId,
+    pub range: Range<usize>,
+    pub anchor_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -180,6 +189,19 @@ pub(crate) struct RecordedRepair {
     byte_range: Range<usize>,
     decision_scope: Range<usize>,
     replacement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppliedChange {
+    group: RepairGroupId,
+    range: Range<usize>,
+    anchor_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppliedCandidate {
+    source: String,
+    changes: Vec<AppliedChange>,
 }
 
 impl RecordedRepair {
@@ -213,6 +235,7 @@ impl RecordedRepair {
         self
     }
 
+    #[cfg(test)]
     pub(crate) const fn span(&self) -> Span {
         self.span
     }
@@ -225,10 +248,12 @@ impl RecordedRepair {
         self.description
     }
 
+    #[cfg(test)]
     pub(crate) fn byte_range(&self) -> Range<usize> {
         self.byte_range.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn replacement(&self) -> &str {
         &self.replacement
     }
@@ -320,32 +345,55 @@ impl RepairPlan {
             group_sets.push(set);
             decision_sets[set.0].groups.push(RepairGroupId(index));
         }
-        let mut patches: Vec<(usize, Range<usize>, String)> = Vec::new();
+        let mut patches: Vec<PlanPatch> = Vec::new();
         for (index, record) in records.iter().enumerate() {
-            let mut discard = false;
+            let group = RepairGroupId(index);
+            let decision_set = group_sets[index];
+            let mut containing_patch = None;
             let mut remove = Vec::new();
-            for (patch_index, (_, range, _)) in patches.iter().enumerate() {
-                if !ranges_overlap(range, &record.byte_range) {
+            for (patch_index, patch) in patches.iter().enumerate() {
+                if !ranges_overlap(&patch.byte_range, &record.byte_range) {
                     continue;
                 }
-                if contains_range(range, &record.byte_range) {
-                    discard = true;
+                if contains_range(&patch.byte_range, &record.byte_range) {
+                    containing_patch = Some(patch_index);
                     break;
                 }
-                if contains_range(&record.byte_range, range) {
+                if contains_range(&record.byte_range, &patch.byte_range) {
                     remove.push(patch_index);
                     continue;
                 }
                 return Err(vec![invalid_plan()]);
             }
-            if discard {
+            if let Some(patch_index) = containing_patch {
+                if patches[patch_index].decision_set != decision_set {
+                    return Err(vec![invalid_plan()]);
+                }
+                patches[patch_index].groups.push(group);
                 continue;
             }
+            let mut patch_groups = vec![group];
             for patch_index in remove.into_iter().rev() {
-                patches.remove(patch_index);
+                let removed = patches.remove(patch_index);
+                if removed.decision_set != decision_set {
+                    return Err(vec![invalid_plan()]);
+                }
+                patch_groups.extend(removed.groups);
             }
-            patches.push((index, record.byte_range.clone(), record.replacement.clone()));
+            patch_groups.sort_by_key(|group| group.index());
+            patches.push(PlanPatch {
+                decision_set,
+                byte_range: record.byte_range.clone(),
+                replacement: record.replacement.clone(),
+                groups: patch_groups,
+            });
         }
+        patches.sort_by(|left, right| {
+            left.byte_range
+                .start
+                .cmp(&right.byte_range.start)
+                .then(left.byte_range.end.cmp(&right.byte_range.end))
+        });
         let groups = records
             .into_iter()
             .enumerate()
@@ -360,14 +408,6 @@ impl RepairPlan {
                     byte_range: record.byte_range,
                     replacement: record.replacement,
                 }],
-            })
-            .collect();
-        let patches = patches
-            .into_iter()
-            .map(|(index, byte_range, replacement)| PlanPatch {
-                decision_set: group_sets[index],
-                byte_range,
-                replacement,
             })
             .collect();
         Ok(Self {
@@ -434,21 +474,26 @@ impl RepairPlan {
             return RepairEvaluation::Ready(RepairCandidate {
                 output: output.clone(),
                 edits: Vec::new(),
+                highlights: Vec::new(),
             });
         }
         let has_pending = selection
             .decisions
             .iter()
             .any(|decision| *decision == RepairDecision::Pending);
-        match self.apply(selection).and_then(|source| {
-            parser::parse_strict_repair_output(&source)
-                .map_err(|diagnostics| diagnostics)
+        match self.apply(selection).and_then(|applied| {
+            parser::parse_strict_repair_output(&applied.source)
                 .and_then(|value| formatter::format_json(&value).map_err(format_diagnostic))
+                .and_then(|output| {
+                    let highlights = map_highlights(&applied.source, &output, &applied.changes)?;
+                    Ok((output, highlights))
+                })
         }) {
-            Ok(output) => {
+            Ok((output, highlights)) => {
                 let candidate = RepairCandidate {
                     output,
                     edits: self.edits.clone(),
+                    highlights,
                 };
                 if has_pending {
                     RepairEvaluation::Preview(candidate)
@@ -460,19 +505,43 @@ impl RepairPlan {
         }
     }
 
-    fn apply(&self, selection: &RepairSelection) -> Result<String, Vec<Diagnostic>> {
+    fn apply(&self, selection: &RepairSelection) -> Result<AppliedCandidate, Vec<Diagnostic>> {
         let mut output = String::new();
+        let mut changes = Vec::new();
         let mut cursor = 0;
         for patch in &self.patches {
             if selection.decisions[patch.decision_set.0] == RepairDecision::Rejected {
                 continue;
             }
+            if patch.byte_range.start < cursor {
+                return Err(vec![invalid_plan()]);
+            }
             append_limited(&mut output, &self.source[cursor..patch.byte_range.start])?;
+            let start = output.len();
             append_limited(&mut output, &patch.replacement)?;
+            let end = output.len();
+            changes.try_reserve(patch.groups.len()).map_err(|_| {
+                vec![Diagnostic::new(
+                    "E020",
+                    DiagnosticKind::AllocationFailed,
+                    None,
+                )]
+            })?;
+            for group in &patch.groups {
+                changes.push(AppliedChange {
+                    group: *group,
+                    range: start..end,
+                    anchor_only: start == end,
+                });
+            }
             cursor = patch.byte_range.end;
         }
         append_limited(&mut output, &self.source[cursor..])?;
-        Ok(output)
+        changes.sort_by_key(|change| change.group.index());
+        Ok(AppliedCandidate {
+            source: output,
+            changes,
+        })
     }
 
     fn blocking_groups(&self, selection: &RepairSelection) -> Vec<RepairGroupId> {
@@ -493,6 +562,161 @@ impl RepairPlan {
             blocking_groups,
         }
     }
+}
+
+fn map_highlights(
+    strict_candidate: &str,
+    formatted_output: &str,
+    changes: &[AppliedChange],
+) -> Result<Vec<CandidateHighlight>, Vec<Diagnostic>> {
+    let strict_tokens = aligned_tokens(strict_candidate)?;
+    let formatted_tokens = aligned_tokens(formatted_output)?;
+    if strict_tokens.len() != formatted_tokens.len()
+        || strict_tokens
+            .iter()
+            .zip(&formatted_tokens)
+            .any(|(strict, formatted)| strict.kind != formatted.kind)
+    {
+        return Err(vec![invalid_plan()]);
+    }
+
+    let mut highlights = Vec::new();
+    for change in changes {
+        if !valid_range(strict_candidate, &change.range) {
+            return Err(vec![invalid_plan()]);
+        }
+        if change.anchor_only {
+            let ordinal = containing_token_ordinal(&strict_tokens, change.range.start)
+                .or_else(|| next_token_ordinal(&strict_tokens, change.range.start))
+                .or_else(|| previous_token_ordinal(&strict_tokens, change.range.start))
+                .ok_or_else(|| vec![invalid_plan()])?;
+            push_highlight(
+                &mut highlights,
+                change.group,
+                &formatted_tokens[ordinal],
+                true,
+            )?;
+            continue;
+        }
+
+        let first = first_token_ending_after(&strict_tokens, change.range.start);
+        let mut matched = false;
+        for (ordinal, token) in strict_tokens.iter().enumerate().skip(first) {
+            if matches!(token.kind, TokenKind::Eof) || token.span.start.byte >= change.range.end {
+                break;
+            }
+            let token_range = token.span.start.byte..token.span.end.byte;
+            if ranges_overlap(&token_range, &change.range) {
+                push_highlight(
+                    &mut highlights,
+                    change.group,
+                    &formatted_tokens[ordinal],
+                    false,
+                )?;
+                matched = true;
+            }
+        }
+        if !matched {
+            return Err(vec![invalid_plan()]);
+        }
+    }
+    Ok(highlights)
+}
+
+fn aligned_tokens(source: &str) -> Result<Vec<Token>, Vec<Diagnostic>> {
+    let (tokens, diagnostics) = lexer::lex_with_mode(source, InputMode::Json);
+    if !diagnostics.is_empty() {
+        return Err(vec![invalid_plan()]);
+    }
+    Ok(tokens)
+}
+
+fn containing_token_ordinal(tokens: &[Token], position: usize) -> Option<usize> {
+    let ordinal = first_token_ending_after(tokens, position);
+    tokens.get(ordinal).and_then(|token| {
+        if !matches!(token.kind, TokenKind::Eof) && token.span.start.byte <= position {
+            Some(ordinal)
+        } else {
+            None
+        }
+    })
+}
+
+fn next_token_ordinal(tokens: &[Token], position: usize) -> Option<usize> {
+    let token_count = non_eof_token_count(tokens);
+    let mut low = 0;
+    let mut high = token_count;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if tokens[middle].span.start.byte < position {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    (low < token_count).then_some(low)
+}
+
+fn previous_token_ordinal(tokens: &[Token], position: usize) -> Option<usize> {
+    let token_count = non_eof_token_count(tokens);
+    let mut low = 0;
+    let mut high = token_count;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if tokens[middle].span.end.byte <= position {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low.checked_sub(1)
+}
+
+fn first_token_ending_after(tokens: &[Token], position: usize) -> usize {
+    let token_count = non_eof_token_count(tokens);
+    let mut low = 0;
+    let mut high = token_count;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if tokens[middle].span.end.byte <= position {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+fn non_eof_token_count(tokens: &[Token]) -> usize {
+    tokens
+        .last()
+        .filter(|token| matches!(token.kind, TokenKind::Eof))
+        .map(|_| tokens.len() - 1)
+        .unwrap_or(tokens.len())
+}
+
+fn push_highlight(
+    highlights: &mut Vec<CandidateHighlight>,
+    group: RepairGroupId,
+    token: &Token,
+    anchor_only: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    if matches!(token.kind, TokenKind::Eof) || token.span.start.byte >= token.span.end.byte {
+        return Err(vec![invalid_plan()]);
+    }
+    highlights.try_reserve(1).map_err(|_| {
+        vec![Diagnostic::new(
+            "E020",
+            DiagnosticKind::AllocationFailed,
+            None,
+        )]
+    })?;
+    highlights.push(CandidateHighlight {
+        group,
+        range: token.span.start.byte..token.span.end.byte,
+        anchor_only,
+    });
+    Ok(())
 }
 
 fn valid_range(source: &str, range: &Range<usize>) -> bool {
@@ -706,5 +930,18 @@ mod tests {
             plan.groups()[0].decision_set(),
             plan.groups()[1].decision_set()
         );
+    }
+
+    #[test]
+    fn token_alignment_mismatch_is_a_controlled_invalid_plan_error() {
+        let changes = vec![AppliedChange {
+            group: RepairGroupId(0),
+            range: 0..1,
+            anchor_only: false,
+        }];
+        let diagnostics = map_highlights("1", "2", &changes).unwrap_err();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "E022");
+        assert_eq!(diagnostics[0].kind, DiagnosticKind::InvalidRepairPlan);
     }
 }
