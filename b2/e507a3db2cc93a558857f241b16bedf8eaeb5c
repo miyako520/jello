@@ -1,0 +1,30 @@
+src/repair_plan.rs
+  s_d00eb2b6d40d10::t_602d6637688e0f 204-219
+src/parser.rs
+  s_d00eb2b6d40d10::t_028cc491ef4f9e 59
+src/lexer.rs
+  s_d00eb2b6d40d10::t_b2dc76417fbfd8 236,694-696,1003-1008
+  s_d00eb2b6d40d10::t_9ae2533dd91963 990-1002,1009-1022
+  s_d00eb2b6d40d10::t_8766b7b50c8903 1-2,4,53,67,86,229-231,237,241-247,252,263-268,272,278,294-301,359,366-368,383-385,394-396,436-439,441-447,574-579,659-664,672-678,688-693,697-702,707-710,712-715
+src/formatter.rs
+  s_d00eb2b6d40d10::t_98725eee974cd9 300-301,303-306
+  s_d00eb2b6d40d10::t_b2dc76417fbfd8 302
+  s_d00eb2b6d40d10::t_602d6637688e0f 257-262
+  s_d00eb2b6d40d10::t_bfbf3a372bc3e0 299
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b2e507a3db2cc93a558857f241b16bedf8eaeb5c",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
