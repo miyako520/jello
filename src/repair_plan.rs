@@ -141,7 +141,14 @@ struct PlanPatch {
     decision_set: RepairDecisionSetId,
     byte_range: Range<usize>,
     replacement: String,
-    groups: Vec<RepairGroupId>,
+    changes: Vec<PlanPatchChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanPatchChange {
+    group: RepairGroupId,
+    byte_range: Range<usize>,
+    deletion_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +356,11 @@ impl RepairPlan {
         for (index, record) in records.iter().enumerate() {
             let group = RepairGroupId(index);
             let decision_set = group_sets[index];
+            let change = PlanPatchChange {
+                group,
+                byte_range: record.byte_range.clone(),
+                deletion_only: record.replacement.is_empty(),
+            };
             let mut containing_patch = None;
             let mut remove = Vec::new();
             for (patch_index, patch) in patches.iter().enumerate() {
@@ -369,23 +381,23 @@ impl RepairPlan {
                 if patches[patch_index].decision_set != decision_set {
                     return Err(vec![invalid_plan()]);
                 }
-                patches[patch_index].groups.push(group);
+                patches[patch_index].changes.push(change);
                 continue;
             }
-            let mut patch_groups = vec![group];
+            let mut patch_changes = vec![change];
             for patch_index in remove.into_iter().rev() {
                 let removed = patches.remove(patch_index);
                 if removed.decision_set != decision_set {
                     return Err(vec![invalid_plan()]);
                 }
-                patch_groups.extend(removed.groups);
+                patch_changes.extend(removed.changes);
             }
-            patch_groups.sort_by_key(|group| group.index());
+            patch_changes.sort_by_key(|change| change.group.index());
             patches.push(PlanPatch {
                 decision_set,
                 byte_range: record.byte_range.clone(),
                 replacement: record.replacement.clone(),
-                groups: patch_groups,
+                changes: patch_changes,
             });
         }
         patches.sort_by(|left, right| {
@@ -520,18 +532,24 @@ impl RepairPlan {
             let start = output.len();
             append_limited(&mut output, &patch.replacement)?;
             let end = output.len();
-            changes.try_reserve(patch.groups.len()).map_err(|_| {
+            changes.try_reserve(patch.changes.len()).map_err(|_| {
                 vec![Diagnostic::new(
                     "E020",
                     DiagnosticKind::AllocationFailed,
                     None,
                 )]
             })?;
-            for group in &patch.groups {
+            for change in &patch.changes {
+                let (range, anchor_only) = if change.deletion_only {
+                    let anchor = projected_deletion_anchor(patch, change, start..end, &output)?;
+                    (anchor..anchor, true)
+                } else {
+                    (start..end, false)
+                };
                 changes.push(AppliedChange {
-                    group: *group,
-                    range: start..end,
-                    anchor_only: start == end,
+                    group: change.group,
+                    range,
+                    anchor_only,
                 });
             }
             cursor = patch.byte_range.end;
@@ -562,6 +580,34 @@ impl RepairPlan {
             blocking_groups,
         }
     }
+}
+
+fn projected_deletion_anchor(
+    patch: &PlanPatch,
+    change: &PlanPatchChange,
+    candidate_range: Range<usize>,
+    candidate: &str,
+) -> Result<usize, Vec<Diagnostic>> {
+    if !contains_range(&patch.byte_range, &change.byte_range)
+        || candidate_range.end > candidate.len()
+    {
+        return Err(vec![invalid_plan()]);
+    }
+    let relative = change.byte_range.start - patch.byte_range.start;
+    let candidate_len = candidate_range.end - candidate_range.start;
+    let offset = if candidate_len == 0 {
+        0
+    } else {
+        relative.min(candidate_len - 1)
+    };
+    let mut anchor = candidate_range.start + offset;
+    while anchor > candidate_range.start && !candidate.is_char_boundary(anchor) {
+        anchor -= 1;
+    }
+    if !candidate.is_char_boundary(anchor) {
+        return Err(vec![invalid_plan()]);
+    }
+    Ok(anchor)
 }
 
 fn map_highlights(

@@ -278,6 +278,29 @@ mod tests {
     }
 
     #[test]
+    fn folded_repairs_keep_independent_highlight_anchor_metadata() {
+        let plan = plan_repair_json5("['li\\\nne']").unwrap();
+        let RepairEvaluation::Preview(candidate) = plan.evaluate(&plan.default_selection()) else {
+            panic!("new plan must start pending");
+        };
+        let highlight_for = |kind| {
+            candidate
+                .highlights
+                .iter()
+                .find(|highlight| plan.groups()[highlight.group.index()].kind() == kind)
+                .expect("repair group must be highlighted")
+        };
+
+        let outer = highlight_for(RepairKind::SingleQuotedString);
+        assert!(!outer.anchor_only);
+        assert_eq!(&candidate.output[outer.range.clone()], "\"line\"");
+
+        let folded = highlight_for(RepairKind::Json5Normalization);
+        assert!(folded.anchor_only);
+        assert_eq!(&candidate.output[folded.range.clone()], "\"line\"");
+    }
+
+    #[test]
     fn public_repair_reparses_formatted_output_larger_than_the_input_limit() {
         let mut source = "[".repeat(255);
         source.push_str(&"0,".repeat(39_999));
