@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use jello::{Diagnostic, FixEdit};
+use jello::{Diagnostic, RepairDecision, RepairDecisionSetId, RepairEvaluation, RepairGroupId};
 
 use crate::i18n::UiLanguage;
 use crate::review::ReviewState;
@@ -16,13 +16,13 @@ pub struct AppModel {
     pub source: String,
     pub preview: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
-    pub repairs: Vec<FixEdit>,
     pub review: Option<ReviewState>,
     pub schema_path: Option<PathBuf>,
     pub schema_state: SchemaState,
     pub status: Option<String>,
     last_edit: Option<Instant>,
     analysis_pending: bool,
+    reevaluation_queued: bool,
     analysis_generation: u64,
 }
 
@@ -34,13 +34,13 @@ impl Default for AppModel {
             source: String::new(),
             preview: None,
             diagnostics: Vec::new(),
-            repairs: Vec::new(),
             review: None,
             schema_path: None,
             schema_state: SchemaState::NotLoaded,
             status: None,
             last_edit: None,
             analysis_pending: false,
+            reevaluation_queued: false,
             analysis_generation: 0,
         }
     }
@@ -51,9 +51,9 @@ impl AppModel {
         self.analysis_generation = self.analysis_generation.saturating_add(1);
         self.last_edit = Some(now);
         self.analysis_pending = true;
+        self.reevaluation_queued = false;
         self.preview = None;
         self.diagnostics.clear();
-        self.repairs.clear();
         self.review = None;
         self.schema_state = SchemaState::NotLoaded;
     }
@@ -62,6 +62,7 @@ impl AppModel {
         self.analysis_generation = self.analysis_generation.saturating_add(1);
         self.last_edit = None;
         self.analysis_pending = true;
+        self.reevaluation_queued = false;
     }
 
     pub fn analysis_generation(&self) -> u64 {
@@ -75,6 +76,18 @@ impl AppModel {
     }
 
     pub fn take_analysis_request(&mut self, now: Instant) -> Option<AnalysisRequest> {
+        if self.reevaluation_queued {
+            self.reevaluation_queued = false;
+            if let Some(review) = &self.review {
+                return Some(AnalysisRequest::Evaluate {
+                    generation: self.analysis_generation,
+                    selection_version: review.selection_version(),
+                    plan: review.plan().clone(),
+                    selection: review.selection().clone(),
+                    schema_path: self.schema_path.clone(),
+                });
+            }
+        }
         if !self.analysis_pending {
             return None;
         }
@@ -85,7 +98,7 @@ impl AppModel {
         }
         self.analysis_pending = false;
         self.last_edit = None;
-        Some(AnalysisRequest {
+        Some(AnalysisRequest::Analyze {
             generation: self.analysis_generation,
             source: self.source.clone(),
             schema_path: self.schema_path.clone(),
@@ -96,11 +109,67 @@ impl AppModel {
         if result.generation != self.analysis_generation {
             return false;
         }
-        self.preview = result.preview;
-        self.diagnostics = result.diagnostics;
-        self.repairs = result.repairs;
-        self.schema_state = result.schema_state;
+        let AnalysisResult {
+            selection_version,
+            plan,
+            evaluation,
+            diagnostics,
+            schema_state,
+            ..
+        } = result;
+        match (plan, evaluation) {
+            (Some(plan), Some(evaluation)) if selection_version == 0 => {
+                self.preview = evaluation_preview(&evaluation);
+                let selection = plan.default_selection();
+                self.review = Some(ReviewState::new(plan, selection, evaluation));
+                self.diagnostics = diagnostics;
+                self.schema_state = schema_state;
+                self.reevaluation_queued = false;
+                true
+            }
+            (None, Some(evaluation)) => {
+                let Some(review) = self.review.as_mut() else {
+                    return false;
+                };
+                if selection_version != review.selection_version() {
+                    return false;
+                }
+                self.preview = evaluation_preview(&evaluation);
+                review.replace_evaluation(evaluation);
+                self.diagnostics = diagnostics;
+                self.schema_state = schema_state;
+                self.reevaluation_queued = false;
+                true
+            }
+            (None, None) if selection_version == 0 => {
+                self.preview = None;
+                self.review = None;
+                self.diagnostics = diagnostics;
+                self.schema_state = schema_state;
+                self.reevaluation_queued = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn decide_repair(&mut self, set_id: RepairDecisionSetId, decision: RepairDecision) -> bool {
+        let Some(review) = self.review.as_mut() else {
+            return false;
+        };
+        if !review.decide(set_id, decision) {
+            return false;
+        }
+        self.reevaluation_queued = true;
         true
+    }
+
+    #[allow(dead_code)]
+    pub fn select_repair(&mut self, group_id: RepairGroupId) {
+        if let Some(review) = self.review.as_mut() {
+            review.set_selected_group(Some(group_id));
+        }
     }
 
     pub fn open_source(&mut self, path: PathBuf, source: String) {
@@ -108,7 +177,6 @@ impl AppModel {
         self.source = source;
         self.preview = None;
         self.diagnostics.clear();
-        self.repairs.clear();
         self.review = None;
         self.schema_state = SchemaState::NotLoaded;
         self.status = None;
@@ -122,19 +190,42 @@ impl AppModel {
     }
 }
 
+fn evaluation_preview(evaluation: &RepairEvaluation) -> Option<String> {
+    match evaluation {
+        RepairEvaluation::Preview(candidate) | RepairEvaluation::Ready(candidate) => {
+            Some(candidate.output.clone())
+        }
+        RepairEvaluation::Invalid { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use std::sync::Arc;
 
-    use jello::RepairDecision;
+    use jello::{RepairDecision, RepairEvaluation};
 
     use crate::review::ReviewState;
     use crate::schema_engine::SchemaState;
-    use crate::worker::AnalysisResult;
+    use crate::worker::{AnalysisRequest, AnalysisResult};
 
     use super::AppModel;
+
+    fn analyzed_result(source: &str, generation: u64) -> AnalysisResult {
+        let plan = Arc::new(jello::plan_repair_json5(source).unwrap());
+        let selection = plan.default_selection();
+        let evaluation = plan.evaluate(&selection);
+        AnalysisResult {
+            generation,
+            selection_version: 0,
+            plan: Some(plan),
+            evaluation: Some(evaluation),
+            diagnostics: Vec::new(),
+            schema_state: SchemaState::NotLoaded,
+        }
+    }
 
     #[test]
     fn analysis_is_submitted_only_after_250_ms_without_edits() {
@@ -153,8 +244,14 @@ mod tests {
         let request = model
             .take_analysis_request(start + Duration::from_millis(250))
             .unwrap();
-        assert_eq!(request.generation, 1);
-        assert_eq!(request.source, "{\"value\": 1}");
+        let AnalysisRequest::Analyze {
+            generation, source, ..
+        } = request
+        else {
+            panic!("source edits must queue analysis");
+        };
+        assert_eq!(generation, 1);
+        assert_eq!(source, "{\"value\": 1}");
     }
 
     #[test]
@@ -173,18 +270,16 @@ mod tests {
         model
             .take_analysis_request(start + Duration::from_millis(550))
             .unwrap();
+        assert!(model.apply_result(analyzed_result("{new:true}", 2)));
         model.preview = Some("latest".to_string());
+        model.schema_state = SchemaState::Valid;
 
-        let applied = model.apply_result(AnalysisResult {
-            generation: 1,
-            preview: Some("stale".to_string()),
-            diagnostics: Vec::new(),
-            repairs: Vec::new(),
-            schema_state: SchemaState::NotLoaded,
-        });
+        let applied = model.apply_result(analyzed_result("{}", 1));
 
         assert!(!applied);
         assert_eq!(model.preview.as_deref(), Some("latest"));
+        assert!(matches!(model.schema_state, SchemaState::Valid));
+        assert_eq!(model.review.as_ref().unwrap().plan().source(), "{new:true}");
     }
 
     #[test]
@@ -197,13 +292,7 @@ mod tests {
         };
         model.request_analysis_now();
         let request = model.take_analysis_request(start).unwrap();
-        assert!(model.apply_result(AnalysisResult {
-            generation: request.generation,
-            preview: Some("{}\n".to_string()),
-            diagnostics: Vec::new(),
-            repairs: Vec::new(),
-            schema_state: SchemaState::NotLoaded,
-        }));
+        assert!(model.apply_result(analyzed_result("{}", request.generation())));
         assert!(model.preview.is_some());
 
         model.source.push(' ');
@@ -261,6 +350,96 @@ mod tests {
     }
 
     #[test]
+    fn successful_analysis_installs_review_and_preview() {
+        let mut model = AppModel::default();
+
+        assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
+
+        assert!(model.preview.is_some());
+        let review = model.review.as_ref().unwrap();
+        assert_eq!(review.selection_version(), 0);
+        assert!(matches!(review.evaluation(), RepairEvaluation::Preview(_)));
+    }
+
+    #[test]
+    fn a_decision_queues_immediate_evaluation_without_source_debounce() {
+        let now = Instant::now();
+        let mut model = AppModel::default();
+        assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
+        let decision_set = model.review.as_ref().unwrap().plan().decision_sets()[0].id();
+
+        assert!(model.decide_repair(decision_set, RepairDecision::Accepted));
+
+        let request = model.take_analysis_request(now).unwrap();
+        let AnalysisRequest::Evaluate {
+            generation,
+            selection_version,
+            selection,
+            ..
+        } = request
+        else {
+            panic!("repair decisions must queue evaluation");
+        };
+        assert_eq!(generation, 0);
+        assert_eq!(selection_version, 1);
+        assert_eq!(
+            selection.decision(decision_set),
+            Some(RepairDecision::Accepted)
+        );
+    }
+
+    #[test]
+    fn stale_selection_results_do_not_replace_review_preview_or_schema() {
+        let now = Instant::now();
+        let mut model = AppModel::default();
+        assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
+        let decision_set = model.review.as_ref().unwrap().plan().decision_sets()[0].id();
+
+        assert!(model.decide_repair(decision_set, RepairDecision::Accepted));
+        let AnalysisRequest::Evaluate {
+            plan, selection, ..
+        } = model.take_analysis_request(now).unwrap()
+        else {
+            panic!("first decision must queue evaluation");
+        };
+        assert!(model.decide_repair(decision_set, RepairDecision::Rejected));
+        model.preview = Some("latest".to_string());
+        model.schema_state = SchemaState::Valid;
+        let stale_evaluation = plan.evaluate(&selection);
+
+        let applied = model.apply_result(AnalysisResult {
+            generation: 0,
+            selection_version: 1,
+            plan: None,
+            evaluation: Some(stale_evaluation),
+            diagnostics: Vec::new(),
+            schema_state: SchemaState::Invalid(Vec::new()),
+        });
+
+        assert!(!applied);
+        assert_eq!(model.preview.as_deref(), Some("latest"));
+        assert!(matches!(model.schema_state, SchemaState::Valid));
+        let review = model.review.as_ref().unwrap();
+        assert_eq!(
+            review.selection().decision(decision_set),
+            Some(RepairDecision::Rejected)
+        );
+        assert_eq!(review.selection_version(), 2);
+        assert!(review.evaluation_pending());
+    }
+
+    #[test]
+    fn selecting_a_repair_updates_the_review_focus() {
+        let mut model = AppModel::default();
+        assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
+        let group = model.review.as_ref().unwrap().plan().groups()[0].id();
+
+        model.select_repair(group);
+
+        assert_eq!(model.review.as_ref().unwrap().selected_group(), Some(group));
+    }
+
+    #[test]
     fn a_result_from_before_the_latest_edit_is_rejected_during_debounce() {
         let start = Instant::now();
         let mut model = AppModel {
@@ -278,13 +457,7 @@ mod tests {
                 .is_none()
         );
 
-        let applied = model.apply_result(AnalysisResult {
-            generation: old_request.generation,
-            preview: Some("stale".to_string()),
-            diagnostics: Vec::new(),
-            repairs: Vec::new(),
-            schema_state: SchemaState::NotLoaded,
-        });
+        let applied = model.apply_result(analyzed_result("{}", old_request.generation()));
 
         assert!(!applied);
         assert!(model.preview.is_none());

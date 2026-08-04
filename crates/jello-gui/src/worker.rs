@@ -8,23 +8,41 @@ use std::thread;
 #[cfg(test)]
 use std::time::Duration;
 
-use jello::{Diagnostic, FixEdit, RepairOutcome};
+use jello::{Diagnostic, RepairEvaluation, RepairPlan, RepairSelection};
 
 use crate::schema_engine::{SchemaEngine, SchemaState};
 
 #[derive(Debug)]
-pub struct AnalysisRequest {
-    pub generation: u64,
-    pub source: String,
-    pub schema_path: Option<PathBuf>,
+pub enum AnalysisRequest {
+    Analyze {
+        generation: u64,
+        source: String,
+        schema_path: Option<PathBuf>,
+    },
+    Evaluate {
+        generation: u64,
+        selection_version: u64,
+        plan: Arc<RepairPlan>,
+        selection: RepairSelection,
+        schema_path: Option<PathBuf>,
+    },
+}
+
+impl AnalysisRequest {
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Analyze { generation, .. } | Self::Evaluate { generation, .. } => *generation,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct AnalysisResult {
     pub generation: u64,
-    pub preview: Option<String>,
+    pub selection_version: u64,
+    pub plan: Option<Arc<RepairPlan>>,
+    pub evaluation: Option<RepairEvaluation>,
     pub diagnostics: Vec<Diagnostic>,
-    pub repairs: Vec<FixEdit>,
     pub schema_state: SchemaState,
 }
 
@@ -59,7 +77,7 @@ impl AnalysisWorker {
     }
 
     pub fn submit(&self, request: AnalysisRequest) -> Result<(), SendError<AnalysisRequest>> {
-        self.invalidate(request.generation);
+        self.invalidate(request.generation());
         self.requests.send(request)
     }
 
@@ -99,49 +117,127 @@ fn analyze(
     schema_engine: &mut SchemaEngine,
     latest_generation: &Arc<AtomicU64>,
 ) -> Option<AnalysisResult> {
-    let AnalysisRequest {
-        generation,
-        source,
-        schema_path,
-    } = request;
+    let generation = request.generation();
     if is_cancelled(latest_generation, generation) {
         return None;
     }
-    let outcome = jello::repair_json5(&source);
-    if is_cancelled(latest_generation, generation) {
-        return None;
-    }
-    match outcome {
-        RepairOutcome::Valid(result) | RepairOutcome::Repaired(result) => {
-            let schema_state = match schema_path.as_deref() {
-                Some(path) => {
-                    schema_engine.validate(path, &result.output, latest_generation, generation)?
-                }
-                None => SchemaState::NotLoaded,
-            };
-            if is_cancelled(latest_generation, generation) {
-                return None;
-            }
-            Some(AnalysisResult {
-                generation,
-                preview: Some(result.output),
-                diagnostics: Vec::new(),
-                repairs: result.edits,
-                schema_state,
-            })
-        }
-        RepairOutcome::Unrepairable(diagnostics) => Some(AnalysisResult {
+    match request {
+        AnalysisRequest::Analyze {
+            source,
+            schema_path,
+            ..
+        } => finish_analyze(
             generation,
-            preview: None,
-            diagnostics,
-            repairs: Vec::new(),
-            schema_state: SchemaState::NotLoaded,
-        }),
+            jello::plan_repair_json5(&source),
+            schema_path,
+            schema_engine,
+            latest_generation,
+        ),
+        AnalysisRequest::Evaluate {
+            selection_version,
+            plan,
+            selection,
+            schema_path,
+            ..
+        } => {
+            let evaluation = plan.evaluate(&selection);
+            evaluated_result(
+                generation,
+                selection_version,
+                None,
+                evaluation,
+                schema_path,
+                schema_engine,
+                latest_generation,
+            )
+        }
     }
+}
+
+fn finish_analyze(
+    generation: u64,
+    planned: Result<RepairPlan, Vec<Diagnostic>>,
+    schema_path: Option<PathBuf>,
+    schema_engine: &mut SchemaEngine,
+    latest_generation: &Arc<AtomicU64>,
+) -> Option<AnalysisResult> {
+    if is_cancelled(latest_generation, generation) {
+        return None;
+    }
+    let plan = match planned {
+        Ok(plan) => Arc::new(plan),
+        Err(diagnostics) => {
+            return Some(AnalysisResult {
+                generation,
+                selection_version: 0,
+                plan: None,
+                evaluation: None,
+                diagnostics,
+                schema_state: SchemaState::NotLoaded,
+            });
+        }
+    };
+    let selection = plan.default_selection();
+    let evaluation = plan.evaluate(&selection);
+    evaluated_result(
+        generation,
+        0,
+        Some(plan),
+        evaluation,
+        schema_path,
+        schema_engine,
+        latest_generation,
+    )
+}
+
+fn evaluated_result(
+    generation: u64,
+    selection_version: u64,
+    plan: Option<Arc<RepairPlan>>,
+    evaluation: RepairEvaluation,
+    schema_path: Option<PathBuf>,
+    schema_engine: &mut SchemaEngine,
+    latest_generation: &Arc<AtomicU64>,
+) -> Option<AnalysisResult> {
+    if is_cancelled(latest_generation, generation) {
+        return None;
+    }
+    let schema_state = match &evaluation {
+        RepairEvaluation::Preview(candidate) | RepairEvaluation::Ready(candidate) => {
+            match schema_path.as_deref() {
+                Some(path) => schema_engine.validate(
+                    path,
+                    &candidate.output,
+                    latest_generation,
+                    generation,
+                )?,
+                None => SchemaState::NotLoaded,
+            }
+        }
+        RepairEvaluation::Invalid { .. } => SchemaState::NotLoaded,
+    };
+    if is_cancelled(latest_generation, generation) {
+        return None;
+    }
+    Some(AnalysisResult {
+        generation,
+        selection_version,
+        plan,
+        evaluation: Some(evaluation),
+        diagnostics: Vec::new(),
+        schema_state,
+    })
 }
 
 fn is_cancelled(latest_generation: &Arc<AtomicU64>, generation: u64) -> bool {
     latest_generation.load(Ordering::Acquire) != generation
+}
+
+#[cfg(test)]
+fn analyze_for_test(request: AnalysisRequest) -> AnalysisResult {
+    let latest_generation = Arc::new(AtomicU64::new(request.generation()));
+    analyze(request, &mut SchemaEngine::default(), &latest_generation)
+        .expect("test analysis should not be cancelled")
 }
 
 #[cfg(test)]
@@ -150,37 +246,55 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::time::Duration;
 
+    use jello::{RepairDecision, RepairEvaluation};
+
     use crate::schema_engine::{SchemaEngine, SchemaState};
 
-    use super::{AnalysisRequest, AnalysisWorker, analyze};
+    use super::{AnalysisRequest, AnalysisWorker, analyze, analyze_for_test, finish_analyze};
 
     #[test]
-    fn repairable_json5_produces_a_strict_preview_and_repairs() {
-        let worker = AnalysisWorker::new(eframe::egui::Context::default());
-        worker
-            .submit(AnalysisRequest {
-                generation: 7,
-                source: "{name: 'Ada', values: [1 2]}".to_string(),
-                schema_path: None,
-            })
-            .unwrap();
-
-        let result = worker.recv_timeout(Duration::from_secs(2)).unwrap();
-
-        assert_eq!(result.generation, 7);
-        assert_eq!(
-            result.preview.as_deref(),
-            Some("{\n  \"name\": \"Ada\",\n  \"values\": [\n    1,\n    2\n  ]\n}")
+    fn repairable_json5_produces_a_pending_plan_and_strict_preview() {
+        let result = analyze_for_test(AnalysisRequest::Analyze {
+            generation: 7,
+            source: "{name: 'Ada', values: [1 2]}".to_string(),
+            schema_path: None,
+        });
+        assert!(
+            result
+                .plan
+                .as_ref()
+                .is_some_and(|plan| !plan.groups().is_empty())
         );
-        assert!(!result.repairs.is_empty());
-        assert!(result.diagnostics.is_empty());
+        assert!(matches!(
+            result.evaluation,
+            Some(RepairEvaluation::Preview(_))
+        ));
+    }
+
+    #[test]
+    fn rejecting_required_repairs_returns_invalid_without_schema_work() {
+        let plan = Arc::new(jello::plan_repair_json5("{name:'Ada'}").unwrap());
+        let mut selection = plan.default_selection();
+        selection.set_all(RepairDecision::Rejected);
+        let result = analyze_for_test(AnalysisRequest::Evaluate {
+            generation: 9,
+            selection_version: 1,
+            plan,
+            selection,
+            schema_path: None,
+        });
+        assert!(matches!(
+            result.evaluation,
+            Some(RepairEvaluation::Invalid { .. })
+        ));
+        assert!(matches!(result.schema_state, SchemaState::NotLoaded));
     }
 
     #[test]
     fn unrepairable_input_preserves_diagnostics_and_has_no_preview() {
         let worker = AnalysisWorker::new(eframe::egui::Context::default());
         worker
-            .submit(AnalysisRequest {
+            .submit(AnalysisRequest::Analyze {
                 generation: 9,
                 source: "{\"name\" 1}".to_string(),
                 schema_path: None,
@@ -190,7 +304,8 @@ mod tests {
         let result = worker.recv_timeout(Duration::from_secs(2)).unwrap();
 
         assert_eq!(result.generation, 9);
-        assert!(result.preview.is_none());
+        assert!(result.evaluation.is_none());
+        assert!(result.plan.is_none());
         assert!(!result.diagnostics.is_empty());
         assert_eq!(result.diagnostics[0].code, "E006");
     }
@@ -206,7 +321,7 @@ mod tests {
         .unwrap();
         let worker = AnalysisWorker::new(eframe::egui::Context::default());
         worker
-            .submit(AnalysisRequest {
+            .submit(AnalysisRequest::Analyze {
                 generation: 11,
                 source: "{age: 'old'}".to_string(),
                 schema_path: Some(schema.clone()),
@@ -223,11 +338,25 @@ mod tests {
     fn superseded_work_is_dropped_before_analysis() {
         let latest = Arc::new(AtomicU64::new(2));
         let result = analyze(
-            AnalysisRequest {
+            AnalysisRequest::Analyze {
                 generation: 1,
                 source: "{}".to_string(),
                 schema_path: None,
             },
+            &mut SchemaEngine::default(),
+            &latest,
+        );
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn superseded_work_is_dropped_after_plan_creation() {
+        let latest = Arc::new(AtomicU64::new(2));
+        let result = finish_analyze(
+            1,
+            jello::plan_repair_json5("{}"),
+            None,
             &mut SchemaEngine::default(),
             &latest,
         );

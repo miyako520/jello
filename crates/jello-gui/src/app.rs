@@ -428,7 +428,10 @@ impl JelloApp {
                     format!(
                         "{} {}",
                         text(self.model.language, Message::Repairs),
-                        self.model.repairs.len()
+                        self.model
+                            .review
+                            .as_ref()
+                            .map_or(0, |review| review.plan().groups().len())
                     ),
                 )
                 .clicked()
@@ -490,17 +493,22 @@ impl JelloApp {
     }
 
     fn repair_rows(&mut self, ui: &mut egui::Ui) {
-        if self.model.repairs.is_empty() {
+        let Some(review) = self.model.review.as_ref() else {
+            ui.label(text(self.model.language, Message::NoRepairs));
+            return;
+        };
+        if review.plan().groups().is_empty() {
             ui.label(text(self.model.language, Message::NoRepairs));
             return;
         }
-        for repair in &self.model.repairs {
+        for repair in review.plan().groups() {
+            let position = repair.changes().first().map(|change| change.span().start);
             ui.label(format!(
                 "{}  {}  {}:{}",
-                repair.code,
-                repair_description(repair.code, &repair.description, self.model.language),
-                repair.line,
-                repair.column
+                repair.code(),
+                repair_description(repair.code(), repair.description(), self.model.language),
+                position.map_or(0, |position| position.line),
+                position.map_or(0, |position| position.column)
             ));
         }
     }
