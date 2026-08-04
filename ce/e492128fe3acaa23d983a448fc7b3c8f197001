@@ -1,0 +1,21 @@
+crates/jello-gui/src/model.rs
+  s_d00eb2b6d40d10::t_e707e0747135e2 122-128
+  s_d00eb2b6d40d10::t_232dccdc55c96c 439-489
+  s_d00eb2b6d40d10::t_ea5e0ca4771508 438
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "cee492128fe3acaa23d983a448fc7b3c8f197001",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
