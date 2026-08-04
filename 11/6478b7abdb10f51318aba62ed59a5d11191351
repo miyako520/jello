@@ -1,0 +1,32 @@
+src/fixer.rs
+  s_d00eb2b6d40d10::t_c819c3a36a2ada 289-302,309-318
+  s_d00eb2b6d40d10::t_4cac9863a22cb1 6,38-52,56-61,63-64,76-82
+  s_d00eb2b6d40d10::t_8552eff1264e9c 275-288,303-308,319-320
+  s_d00eb2b6d40d10::t_d410c653858fa2 83
+src/parser.rs
+  s_d00eb2b6d40d10::t_ec45c5876db40c 4,8,19,25,33,51,60-61,72,100
+  s_d00eb2b6d40d10::t_1655259081b527 184,186-192,206,208-214,233,239-247,260,285,291-299,312
+  s_d00eb2b6d40d10::t_843249fa2ed0d2 9
+  s_d00eb2b6d40d10::t_e45430ba8e690e 340-350,354-389,392,394-398,400,411,416-421,423,428-437
+  s_d00eb2b6d40d10::t_a8fd2d11ebb4c3 651,661
+  s_d00eb2b6d40d10::t_c819c3a36a2ada 87,424-427,438-439
+  s_d00eb2b6d40d10::t_f61372478bf42e 422
+src/repair_plan.rs
+  s_d00eb2b6d40d10::t_5292121b56f89d 81-83,150,376,384-407,433-438
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "116478b7abdb10f51318aba62ed59a5d11191351",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
