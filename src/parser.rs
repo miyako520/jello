@@ -1,9 +1,12 @@
 use crate::ast::Value;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::fixer::FixEdit;
+use crate::formatter::{json_string_literal, FormatError};
 use crate::lexer::{
     is_whitespace, lex_for_repair, lex_with_mode, InputMode, Token, TokenKind, MAX_REPAIR_EDITS,
 };
+use crate::repair_plan::{RecordedRepair, RepairKind};
+use crate::span::Span;
 
 pub const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_NESTING_DEPTH: usize = 256;
@@ -13,13 +16,13 @@ pub fn parse(source: &str) -> Result<Value, Vec<Diagnostic>> {
 }
 
 pub fn parse_with_mode(source: &str, mode: InputMode) -> Result<Value, Vec<Diagnostic>> {
-    parse_internal(source, mode, false).map(|(value, _)| value)
+    parse_internal(source, mode, false).map(|(value, _, _)| value)
 }
 
 pub(crate) fn parse_repair(
     source: &str,
     mode: InputMode,
-) -> Result<(Value, Vec<FixEdit>), Vec<Diagnostic>> {
+) -> Result<(Value, Vec<FixEdit>, Vec<RecordedRepair>), Vec<Diagnostic>> {
     parse_internal(source, mode, true)
 }
 
@@ -27,7 +30,7 @@ fn parse_internal(
     source: &str,
     mode: InputMode,
     repair: bool,
-) -> Result<(Value, Vec<FixEdit>), Vec<Diagnostic>> {
+) -> Result<(Value, Vec<FixEdit>, Vec<RecordedRepair>), Vec<Diagnostic>> {
     if source.len() > MAX_INPUT_BYTES {
         return Err(vec![Diagnostic::new(
             "E014",
@@ -45,7 +48,7 @@ fn parse_internal(
         )]);
     }
 
-    let (tokens, lex_errors, lex_edits) = if repair {
+    let (tokens, lex_errors, lex_records) = if repair {
         lex_for_repair(source, mode)
     } else {
         let (tokens, diagnostics) = lex_with_mode(source, mode);
@@ -54,8 +57,8 @@ fn parse_internal(
     if !lex_errors.is_empty() {
         return Err(lex_errors);
     }
-    let edits = lex_edits
-        .into_iter()
+    let edits = lex_records
+        .iter()
         .map(|record| FixEdit::at("F005", record.description(), record.audit_position()))
         .collect();
 
@@ -66,6 +69,7 @@ fn parse_internal(
         mode,
         repair,
         edits,
+        records: lex_records,
         diagnostics: Vec::new(),
     };
     let value = parser.parse_value(0);
@@ -80,7 +84,7 @@ fn parse_internal(
     }
 
     if parser.diagnostics.is_empty() {
-        Ok((value.unwrap_or(Value::Null), parser.edits))
+        Ok((value.unwrap_or(Value::Null), parser.edits, parser.records))
     } else {
         Err(parser.diagnostics)
     }
@@ -93,6 +97,7 @@ struct Parser<'a> {
     mode: InputMode,
     repair: bool,
     edits: Vec<FixEdit>,
+    records: Vec<RecordedRepair>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -176,9 +181,15 @@ impl Parser<'_> {
                 }
                 TokenKind::Identifier(key) if self.mode == InputMode::Json5 => {
                     let key = key.clone();
-                    let position = self.current().span.start;
+                    let span = self.current().span;
                     if self.repair {
-                        self.record_edit("F002", "quoted unquoted object key", position);
+                        self.record_json_string_replacement(
+                            RepairKind::UnquotedObjectKey,
+                            "F002",
+                            "quoted unquoted object key",
+                            span,
+                            &key,
+                        );
                     }
                     self.advance();
                     key
@@ -192,9 +203,15 @@ impl Parser<'_> {
                         TokenKind::Null => "null",
                         _ => unreachable!(),
                     };
-                    let position = self.current().span.start;
+                    let span = self.current().span;
                     if self.repair {
-                        self.record_edit("F002", "quoted unquoted object key", position);
+                        self.record_json_string_replacement(
+                            RepairKind::UnquotedObjectKey,
+                            "F002",
+                            "quoted unquoted object key",
+                            span,
+                            key,
+                        );
                     }
                     self.advance();
                     key.to_string()
@@ -213,13 +230,21 @@ impl Parser<'_> {
             let value = self.parse_value(depth + 1)?;
             pairs.push((key, value));
 
-            let comma_position = self.current().span.start;
+            let comma_span = self.current().span;
             if self.consume_if(TokenDiscriminant::Comma) {
                 if (self.mode == InputMode::Json5 || self.repair)
                     && self.consume_if(TokenDiscriminant::RightBrace)
                 {
                     if self.repair {
-                        self.record_edit("F003", "removed trailing comma", comma_position);
+                        self.record_edit(
+                            RepairKind::TrailingComma,
+                            "F003",
+                            "removed trailing comma",
+                            comma_span,
+                            comma_span.start.byte..comma_span.end.byte,
+                            comma_span.start.byte..comma_span.end.byte,
+                            String::new(),
+                        );
                     }
                     break;
                 }
@@ -232,8 +257,7 @@ impl Parser<'_> {
                 && self.has_trivia_before_current()
                 && can_start_object_key(&self.current().kind)
             {
-                let position = self.current().span.start;
-                self.record_edit("F004", "inserted missing comma", position);
+                self.record_missing_comma();
                 continue;
             }
             self.expected("`,` or `}`");
@@ -258,13 +282,21 @@ impl Parser<'_> {
             }
             values.push(self.parse_value(depth + 1)?);
 
-            let comma_position = self.current().span.start;
+            let comma_span = self.current().span;
             if self.consume_if(TokenDiscriminant::Comma) {
                 if (self.mode == InputMode::Json5 || self.repair)
                     && self.consume_if(TokenDiscriminant::RightBracket)
                 {
                     if self.repair {
-                        self.record_edit("F003", "removed trailing comma", comma_position);
+                        self.record_edit(
+                            RepairKind::TrailingComma,
+                            "F003",
+                            "removed trailing comma",
+                            comma_span,
+                            comma_span.start.byte..comma_span.end.byte,
+                            comma_span.start.byte..comma_span.end.byte,
+                            String::new(),
+                        );
                     }
                     break;
                 }
@@ -277,8 +309,7 @@ impl Parser<'_> {
                 && self.has_trivia_before_current()
                 && can_start_value(&self.current().kind)
             {
-                let position = self.current().span.start;
-                self.record_edit("F004", "inserted missing comma", position);
+                self.record_missing_comma();
                 continue;
             }
             self.expected("`,` or `]`");
@@ -306,17 +337,67 @@ impl Parser<'_> {
 
     fn record_single_quote(&mut self, span: crate::span::Span) {
         if self.repair && self.source.as_bytes().get(span.start.byte).copied() == Some(b'\'') {
-            self.record_edit("F001", "converted single-quoted string", span.start);
+            let TokenKind::String(value) = &self.current().kind else {
+                return;
+            };
+            let value = value.clone();
+            self.record_json_string_replacement(
+                RepairKind::SingleQuotedString,
+                "F001",
+                "converted single-quoted string",
+                span,
+                &value,
+            );
         }
+    }
+
+    fn record_json_string_replacement(
+        &mut self,
+        kind: RepairKind,
+        code: &'static str,
+        description: &'static str,
+        span: Span,
+        value: &str,
+    ) {
+        match json_string_literal(value) {
+            Ok(replacement) => self.record_edit(
+                kind,
+                code,
+                description,
+                span,
+                span.start.byte..span.end.byte,
+                span.start.byte..span.end.byte,
+                replacement,
+            ),
+            Err(error) => self.record_format_error(error, span),
+        }
+    }
+
+    fn record_missing_comma(&mut self) {
+        let next = self.current().span.start;
+        let previous_end = self.tokens[self.index - 1].span.end.byte;
+        self.record_edit(
+            RepairKind::MissingComma,
+            "F004",
+            "inserted missing comma",
+            Span::new(next, next),
+            next.byte..next.byte,
+            previous_end..next.byte,
+            ",".to_string(),
+        );
     }
 
     fn record_edit(
         &mut self,
+        kind: RepairKind,
         code: &'static str,
-        description: &str,
-        position: crate::span::Position,
+        description: &'static str,
+        span: Span,
+        byte_range: std::ops::Range<usize>,
+        decision_scope: std::ops::Range<usize>,
+        replacement: String,
     ) {
-        if self.edits.len() >= MAX_REPAIR_EDITS {
+        if self.edits.len() >= MAX_REPAIR_EDITS || self.records.len() >= MAX_REPAIR_EDITS {
             if !self
                 .diagnostics
                 .iter()
@@ -327,12 +408,35 @@ impl Parser<'_> {
                     DiagnosticKind::TooManyRepairs {
                         max_repairs: MAX_REPAIR_EDITS,
                     },
-                    Some(crate::span::Span::new(position, position)),
+                    Some(span),
                 ));
             }
             return;
         }
-        self.edits.push(FixEdit::at(code, description, position));
+        if self.edits.try_reserve(1).is_err() || self.records.try_reserve(1).is_err() {
+            self.diagnostics.push(Diagnostic::new(
+                "E020",
+                DiagnosticKind::AllocationFailed,
+                Some(span),
+            ));
+            return;
+        }
+        let record =
+            RecordedRepair::replace(kind, code, description, span, byte_range, replacement)
+                .with_decision_scope(decision_scope);
+        self.edits.push(FixEdit::at(code, description, span.start));
+        self.records.push(record);
+    }
+
+    fn record_format_error(&mut self, error: FormatError, span: Span) {
+        let (code, kind) = match error {
+            FormatError::OutputTooLarge { max_bytes } => {
+                ("E019", DiagnosticKind::OutputTooLarge { max_bytes })
+            }
+            FormatError::AllocationFailed => ("E020", DiagnosticKind::AllocationFailed),
+        };
+        self.diagnostics
+            .push(Diagnostic::new(code, kind, Some(span)));
     }
 
     fn consume_if(&mut self, expected: TokenDiscriminant) -> bool {
@@ -544,7 +648,7 @@ mod tests {
     }
     #[test]
     fn repairs_missing_comma_before_json5_keyword_object_keys() {
-        let (parsed, edits) =
+        let (parsed, edits, _) =
             parse_repair("{a: 1 true: 2 false: 3 null: 4}", InputMode::Json5).unwrap();
         assert!(matches!(parsed, Value::Object(_)));
         assert_eq!(edits.iter().filter(|edit| edit.code == "F004").count(), 3);
@@ -554,7 +658,7 @@ mod tests {
     fn json5_whitespace_audit_keeps_the_first_non_json_whitespace_position() {
         let source = "{ \u{00a0}\"a\":1}";
         let (_, diagnostics, records) = lex_for_repair(source, InputMode::Json5);
-        let (_, edits) = parse_repair(source, InputMode::Json5).unwrap();
+        let (_, edits, _) = parse_repair(source, InputMode::Json5).unwrap();
 
         assert!(diagnostics.is_empty());
         let record = records

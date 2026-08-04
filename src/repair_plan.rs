@@ -78,6 +78,9 @@ impl RepairGroup {
     pub const fn decision_set(&self) -> RepairDecisionSetId {
         self.decision_set
     }
+    pub const fn decision_set_id(&self) -> RepairDecisionSetId {
+        self.decision_set
+    }
     pub const fn kind(&self) -> RepairKind {
         self.kind
     }
@@ -144,6 +147,7 @@ struct PlanPatch {
 pub struct RepairPlan {
     source: Arc<str>,
     source_fingerprint: u64,
+    valid_output: Option<String>,
     groups: Vec<RepairGroup>,
     decision_sets: Vec<RepairDecisionSet>,
     edits: Vec<FixEdit>,
@@ -369,10 +373,35 @@ impl RepairPlan {
         Ok(Self {
             source: Arc::from(source),
             source_fingerprint: fingerprint(source),
+            valid_output: None,
             groups,
             decision_sets,
             edits,
             patches,
+        })
+    }
+
+    pub(crate) fn valid(source: &str, output: String) -> Result<Self, Vec<Diagnostic>> {
+        if source.len() > MAX_INPUT_BYTES {
+            return Err(vec![input_too_large()]);
+        }
+        if output.len() > MAX_OUTPUT_BYTES {
+            return Err(vec![Diagnostic::new(
+                "E019",
+                DiagnosticKind::OutputTooLarge {
+                    max_bytes: MAX_OUTPUT_BYTES,
+                },
+                None,
+            )]);
+        }
+        Ok(Self {
+            source: Arc::from(source),
+            source_fingerprint: fingerprint(source),
+            valid_output: Some(output),
+            groups: Vec::new(),
+            decision_sets: Vec::new(),
+            edits: Vec::new(),
+            patches: Vec::new(),
         })
     }
 
@@ -400,6 +429,12 @@ impl RepairPlan {
                 vec![invalid_plan()],
                 self.groups.iter().map(|group| group.id).collect(),
             );
+        }
+        if let Some(output) = &self.valid_output {
+            return RepairEvaluation::Ready(RepairCandidate {
+                output: output.clone(),
+                edits: Vec::new(),
+            });
         }
         let has_pending = selection
             .decisions

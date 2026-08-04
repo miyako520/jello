@@ -3,6 +3,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::formatter::{format_json, FormatError};
 use crate::lexer::InputMode;
 use crate::parser::{parse_repair, parse_with_mode};
+use crate::repair_plan::{RepairDecision, RepairEvaluation, RepairPlan};
 use crate::span::Position;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,29 +35,33 @@ pub(crate) struct FixResult {
 }
 
 pub(crate) fn fix(source: &str, mode: InputMode) -> Result<FixResult, Vec<Diagnostic>> {
-    if let Some(value) = parse_without_repairs(source, mode) {
-        let output = format_json(&value).map_err(format_diagnostic)?;
-        return Ok(FixResult {
-            value,
-            output,
-            edits: Vec::new(),
-        });
+    let plan = plan(source, mode)?;
+    let mut selection = plan.default_selection();
+    selection.set_all(RepairDecision::Accepted);
+    match plan.evaluate(&selection) {
+        RepairEvaluation::Ready(candidate) => {
+            let value = parse_with_mode(&candidate.output, InputMode::Json)?;
+            Ok(FixResult {
+                value,
+                output: candidate.output,
+                edits: candidate.edits,
+            })
+        }
+        RepairEvaluation::Preview(_) | RepairEvaluation::Invalid { .. } => {
+            Err(invalid_plan_diagnostic())
+        }
     }
-
-    let (value, edits) = parse_repair(source, mode)?;
-    let output = format_json(&value).map_err(format_diagnostic)?;
-    Ok(FixResult {
-        value,
-        output,
-        edits,
-    })
 }
 
-fn parse_without_repairs(source: &str, mode: InputMode) -> Option<Value> {
-    if mode != InputMode::Json {
-        return None;
+pub(crate) fn plan(source: &str, mode: InputMode) -> Result<RepairPlan, Vec<Diagnostic>> {
+    if mode == InputMode::Json {
+        if let Ok(value) = parse_with_mode(source, mode) {
+            let output = format_json(&value).map_err(format_diagnostic)?;
+            return RepairPlan::valid(source, output);
+        }
     }
-    parse_with_mode(source, mode).ok()
+    let (_value, edits, records) = parse_repair(source, mode)?;
+    RepairPlan::from_records(source, edits, records)
 }
 
 fn format_diagnostic(error: FormatError) -> Vec<Diagnostic> {
@@ -67,6 +72,14 @@ fn format_diagnostic(error: FormatError) -> Vec<Diagnostic> {
         FormatError::AllocationFailed => ("E020", DiagnosticKind::AllocationFailed),
     };
     vec![Diagnostic::new(code, kind, None)]
+}
+
+fn invalid_plan_diagnostic() -> Vec<Diagnostic> {
+    vec![Diagnostic::new(
+        "E022",
+        DiagnosticKind::InvalidRepairPlan,
+        None,
+    )]
 }
 #[cfg(test)]
 mod tests {
@@ -258,5 +271,51 @@ mod tests {
             let fixed = fix(source, mode).unwrap();
             assert!(fixed.edits.iter().any(|edit| edit.code == "F004"));
         }
+    }
+
+    #[test]
+    fn plan_exposes_structured_groups_for_every_repair_code() {
+        let plan = plan("{name:'Ada' values:[1,]}", InputMode::Json5).unwrap();
+        let codes: Vec<_> = plan.groups().iter().map(|group| group.code()).collect();
+        assert!(codes.contains(&"F001"));
+        assert!(codes.contains(&"F002"));
+        assert!(codes.contains(&"F003"));
+        assert!(codes.contains(&"F004"));
+    }
+
+    #[test]
+    fn string_wide_repair_links_inner_normalization_to_one_decision_set() {
+        let plan = plan("['a\\\nb']", InputMode::Json5).unwrap();
+        assert_eq!(
+            plan.groups()
+                .iter()
+                .filter(|group| group.code() == "F001")
+                .count(),
+            1
+        );
+        assert_eq!(
+            plan.groups()
+                .iter()
+                .filter(|group| group.code() == "F005")
+                .count(),
+            1
+        );
+        assert_eq!(plan.decision_sets().len(), 1);
+    }
+
+    #[test]
+    fn missing_comma_links_json5_gap_normalization_to_the_same_set() {
+        let plan = plan("[1\u{00a0}2]", InputMode::Json5).unwrap();
+        let comma = plan
+            .groups()
+            .iter()
+            .find(|group| group.code() == "F004")
+            .unwrap();
+        let whitespace = plan
+            .groups()
+            .iter()
+            .find(|group| group.code() == "F005")
+            .unwrap();
+        assert_eq!(comma.decision_set_id(), whitespace.decision_set_id());
     }
 }
