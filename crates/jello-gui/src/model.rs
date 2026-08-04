@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use jello::{Diagnostic, FixEdit};
 
 use crate::i18n::UiLanguage;
+use crate::review::ReviewState;
 use crate::schema_engine::SchemaState;
 use crate::worker::{AnalysisRequest, AnalysisResult};
 
@@ -16,6 +17,7 @@ pub struct AppModel {
     pub preview: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
     pub repairs: Vec<FixEdit>,
+    pub review: Option<ReviewState>,
     pub schema_path: Option<PathBuf>,
     pub schema_state: SchemaState,
     pub status: Option<String>,
@@ -33,6 +35,7 @@ impl Default for AppModel {
             preview: None,
             diagnostics: Vec::new(),
             repairs: Vec::new(),
+            review: None,
             schema_path: None,
             schema_state: SchemaState::NotLoaded,
             status: None,
@@ -51,6 +54,7 @@ impl AppModel {
         self.preview = None;
         self.diagnostics.clear();
         self.repairs.clear();
+        self.review = None;
         self.schema_state = SchemaState::NotLoaded;
     }
 
@@ -65,7 +69,9 @@ impl AppModel {
     }
 
     pub fn can_save(&self) -> bool {
-        self.source_path.is_some() && self.preview.is_some()
+        self.source_path.is_some()
+            && self.preview.is_some()
+            && self.review.as_ref().is_none_or(ReviewState::can_save)
     }
 
     pub fn take_analysis_request(&mut self, now: Instant) -> Option<AnalysisRequest> {
@@ -103,6 +109,7 @@ impl AppModel {
         self.preview = None;
         self.diagnostics.clear();
         self.repairs.clear();
+        self.review = None;
         self.schema_state = SchemaState::NotLoaded;
         self.status = None;
         self.request_analysis_now();
@@ -119,6 +126,11 @@ impl AppModel {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use std::sync::Arc;
+
+    use jello::RepairDecision;
+
+    use crate::review::ReviewState;
     use crate::schema_engine::SchemaState;
     use crate::worker::AnalysisResult;
 
@@ -201,6 +213,51 @@ mod tests {
             model.preview.is_none(),
             "an edited source must not retain a preview that can be saved"
         );
+    }
+
+    #[test]
+    fn editing_immediately_clears_the_review_state() {
+        let start = Instant::now();
+        let plan = Arc::new(jello::plan_repair_json5("{name:'Ada'}").unwrap());
+        let selection = plan.default_selection();
+        let evaluation = plan.evaluate(&selection);
+        let review = ReviewState::new(plan, selection, evaluation);
+        let mut model = AppModel {
+            source_path: Some("example.json".into()),
+            source: "{name:'Ada'}".to_string(),
+            preview: Some("{\n  \"name\": \"Ada\"\n}\n".to_string()),
+            review: Some(review),
+            ..Default::default()
+        };
+
+        model.mark_edited(start);
+
+        assert!(model.review.is_none());
+        assert!(model.preview.is_none());
+    }
+
+    #[test]
+    fn review_blocks_save_while_evaluation_or_decisions_are_pending() {
+        let plan = Arc::new(jello::plan_repair_json5("{name:'Ada'}").unwrap());
+        let selection = plan.default_selection();
+        let evaluation = plan.evaluate(&selection);
+        let mut review = ReviewState::new(plan, selection, evaluation);
+        let mut model = AppModel {
+            source_path: Some("example.json".into()),
+            preview: Some("{\n  \"name\": \"Ada\"\n}\n".to_string()),
+            review: Some(review.clone()),
+            ..Default::default()
+        };
+
+        assert!(!model.can_save());
+
+        review.set_all(RepairDecision::Accepted);
+        model.review = Some(review.clone());
+        assert!(!model.can_save());
+
+        review.replace_evaluation(review.plan().evaluate(review.selection()));
+        model.review = Some(review);
+        assert!(model.can_save());
     }
 
     #[test]
