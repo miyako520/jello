@@ -1,0 +1,25 @@
+src/parser.rs
+  s_d00eb2b6d40d10::t_5ae9e6012d813e 4,19,26-39,46,48
+src/lib.rs
+  s_d00eb2b6d40d10::t_b2351a0451f731 188-203
+src/fixer.rs
+  s_d00eb2b6d40d10::t_5ae9e6012d813e 5,43
+src/repair_plan.rs
+  s_d00eb2b6d40d10::t_5ae9e6012d813e 444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "48e42f07b62c2718c0db3fca7453a64bc8a485a3",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
