@@ -185,4 +185,20 @@ mod tests {
             RepairOutcome::Unrepairable(_)
         ));
     }
+
+    #[test]
+    fn public_repair_reparses_formatted_output_larger_than_the_input_limit() {
+        let mut source = "[".repeat(255);
+        source.push_str(&"0,".repeat(39_999));
+        source.push('0');
+        source.push_str(&"]".repeat(255));
+        assert!(source.len() < MAX_INPUT_BYTES);
+
+        let outcome = repair(&source);
+        let RepairOutcome::Valid(result) = outcome else {
+            panic!("valid bounded source must remain repairable: {outcome:?}");
+        };
+        assert!(result.output.len() > MAX_INPUT_BYTES);
+        assert!(result.output.len() <= MAX_OUTPUT_BYTES);
+    }
 }

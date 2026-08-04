@@ -1,7 +1,7 @@
 use crate::ast::Value;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::fixer::FixEdit;
-use crate::formatter::{json_string_literal, FormatError};
+use crate::formatter::{json_string_literal, FormatError, MAX_OUTPUT_BYTES};
 use crate::lexer::{
     is_whitespace, lex_for_repair, lex_with_mode, InputMode, Token, TokenKind, MAX_REPAIR_EDITS,
 };
@@ -16,22 +16,36 @@ pub fn parse(source: &str) -> Result<Value, Vec<Diagnostic>> {
 }
 
 pub fn parse_with_mode(source: &str, mode: InputMode) -> Result<Value, Vec<Diagnostic>> {
-    parse_internal(source, mode, false).map(|(value, _, _)| value)
+    parse_internal(source, mode, false, true).map(|(value, _, _)| value)
 }
 
 pub(crate) fn parse_repair(
     source: &str,
     mode: InputMode,
 ) -> Result<(Value, Vec<FixEdit>, Vec<RecordedRepair>), Vec<Diagnostic>> {
-    parse_internal(source, mode, true)
+    parse_internal(source, mode, true, true)
+}
+
+pub(crate) fn parse_strict_repair_output(source: &str) -> Result<Value, Vec<Diagnostic>> {
+    if source.len() > MAX_OUTPUT_BYTES {
+        return Err(vec![Diagnostic::new(
+            "E019",
+            DiagnosticKind::OutputTooLarge {
+                max_bytes: MAX_OUTPUT_BYTES,
+            },
+            None,
+        )]);
+    }
+    parse_internal(source, InputMode::Json, false, false).map(|(value, _, _)| value)
 }
 
 fn parse_internal(
     source: &str,
     mode: InputMode,
     repair: bool,
+    enforce_input_limit: bool,
 ) -> Result<(Value, Vec<FixEdit>, Vec<RecordedRepair>), Vec<Diagnostic>> {
-    if source.len() > MAX_INPUT_BYTES {
+    if enforce_input_limit && source.len() > MAX_INPUT_BYTES {
         return Err(vec![Diagnostic::new(
             "E014",
             DiagnosticKind::InputTooLarge {

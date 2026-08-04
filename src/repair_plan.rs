@@ -441,7 +441,7 @@ impl RepairPlan {
             .iter()
             .any(|decision| *decision == RepairDecision::Pending);
         match self.apply(selection).and_then(|source| {
-            parser::parse(&source)
+            parser::parse_strict_repair_output(&source)
                 .map_err(|diagnostics| diagnostics)
                 .and_then(|value| formatter::format_json(&value).map_err(format_diagnostic))
         }) {

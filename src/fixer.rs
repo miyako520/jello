@@ -2,7 +2,7 @@ use crate::ast::Value;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::formatter::{format_json, FormatError};
 use crate::lexer::InputMode;
-use crate::parser::{parse_repair, parse_with_mode};
+use crate::parser::{parse_repair, parse_strict_repair_output, parse_with_mode};
 use crate::repair_plan::{RepairDecision, RepairEvaluation, RepairPlan};
 use crate::span::Position;
 
@@ -40,7 +40,7 @@ pub(crate) fn fix(source: &str, mode: InputMode) -> Result<FixResult, Vec<Diagno
     selection.set_all(RepairDecision::Accepted);
     match plan.evaluate(&selection) {
         RepairEvaluation::Ready(candidate) => {
-            let value = parse_with_mode(&candidate.output, InputMode::Json)?;
+            let value = parse_strict_repair_output(&candidate.output)?;
             Ok(FixResult {
                 value,
                 output: candidate.output,
