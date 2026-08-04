@@ -1,0 +1,21 @@
+src/repair_plan.rs
+  s_d00eb2b6d40d10::t_9ef8c2dcdf334b 638
+  s_d00eb2b6d40d10::t_921b1b39e9d40b 245-246,248-259,265-269,636-637,639-646
+  s_d00eb2b6d40d10::t_990e8f61efc148 608-635,647
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "9ccd02a7ab3336e73cb9ba63bee13d1ad824e33b",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
