@@ -70,6 +70,7 @@ pub enum DiagnosticKind {
     TooManyErrors { max_errors: usize },
     TooManyTokens { max_tokens: usize },
     TooManyRepairs { max_repairs: usize },
+    InvalidRepairPlan,
     AllocationFailed,
     NestingTooDeep { max_depth: usize },
     Expected(String),
@@ -171,6 +172,13 @@ impl Diagnostic {
             }
             (DiagnosticKind::TooManyRepairs { max_repairs }, Language::Zh) => {
                 format!("修复需要超过 {} 项编辑", max_repairs)
+            }
+            (DiagnosticKind::InvalidRepairPlan, Language::En) => {
+                "repair plan contains overlapping edits that cannot be applied atomically"
+                    .to_string()
+            }
+            (DiagnosticKind::InvalidRepairPlan, Language::Zh) => {
+                "\u{4fee}\u{590d}\u{8ba1}\u{5212}\u{5305}\u{542b}\u{65e0}\u{6cd5}\u{539f}\u{5b50}\u{5e94}\u{7528}\u{7684}\u{91cd}\u{53e0}\u{7f16}\u{8f91}".to_string()
             }
             (DiagnosticKind::AllocationFailed, Language::En) => {
                 "unable to allocate memory for the operation".to_string()

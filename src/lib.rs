@@ -11,6 +11,7 @@ mod input;
 mod lexer;
 mod output;
 mod parser;
+mod repair_plan;
 mod span;
 mod stats;
 
@@ -21,6 +22,10 @@ pub use input::read_utf8_file_stable;
 pub use lexer::{MAX_DIAGNOSTICS, MAX_REPAIR_EDITS, MAX_TOKENS};
 pub use output::{save_as_new, save_fixed, CleanupWarning, SavedOutput};
 pub use parser::{MAX_INPUT_BYTES, MAX_NESTING_DEPTH};
+pub use repair_plan::{
+    RepairCandidate, RepairChange, RepairDecision, RepairDecisionSet, RepairDecisionSetId,
+    RepairEvaluation, RepairGroup, RepairGroupId, RepairKind, RepairPlan, RepairSelection,
+};
 pub use span::{Position, Span};
 pub use stats::Stats;
 
