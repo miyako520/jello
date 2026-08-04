@@ -193,7 +193,15 @@ impl AppModel {
     pub fn select_schema(&mut self, path: PathBuf) {
         self.schema_path = Some(path);
         self.schema_state = SchemaState::NotLoaded;
-        self.request_analysis_now();
+        if let Some(review) = self.review.as_mut() {
+            self.analysis_generation = self.analysis_generation.saturating_add(1);
+            self.last_edit = None;
+            self.analysis_pending = false;
+            self.reevaluation_queued = true;
+            review.mark_evaluation_pending();
+        } else {
+            self.request_analysis_now();
+        }
     }
 }
 
@@ -208,6 +216,7 @@ fn evaluation_preview(evaluation: &RepairEvaluation) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use std::sync::Arc;
@@ -441,12 +450,12 @@ mod tests {
         let mut model = AppModel::default();
         assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
         let decision_set = model.review.as_ref().unwrap().plan().decision_sets()[0].id();
-        model.select_schema("schema.json".into());
+        model.request_analysis_now();
 
         let AnalysisRequest::Analyze { generation: 1, .. } =
             model.take_analysis_request(now).unwrap()
         else {
-            panic!("schema changes must queue a new analysis generation");
+            panic!("explicit reanalysis must queue a new analysis generation");
         };
         assert!(model.decide_repair(decision_set, RepairDecision::Accepted));
 
@@ -474,6 +483,74 @@ mod tests {
             selection_version,
             plan: None,
             evaluation: Some(evaluation),
+            diagnostics: Vec::new(),
+            schema_state: SchemaState::Valid,
+        }));
+        let review = model.review.as_ref().unwrap();
+        assert_eq!(review.selection_version(), 1);
+        assert_eq!(
+            review.selection().decision(decision_set),
+            Some(RepairDecision::Accepted)
+        );
+        assert!(!review.evaluation_pending());
+        assert!(matches!(model.schema_state, SchemaState::Valid));
+    }
+
+    #[test]
+    fn selecting_schema_re_evaluates_the_current_review_selection() {
+        let now = Instant::now();
+        let mut model = AppModel::default();
+        assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
+        let decision_set = model.review.as_ref().unwrap().plan().decision_sets()[0].id();
+        assert!(model.decide_repair(decision_set, RepairDecision::Accepted));
+        let AnalysisRequest::Evaluate {
+            generation,
+            selection_version,
+            plan,
+            selection,
+            ..
+        } = model.take_analysis_request(now).unwrap()
+        else {
+            panic!("repair decision must queue evaluation");
+        };
+        assert!(model.apply_result(AnalysisResult {
+            generation,
+            selection_version,
+            plan: None,
+            evaluation: Some(plan.evaluate(&selection)),
+            diagnostics: Vec::new(),
+            schema_state: SchemaState::NotLoaded,
+        }));
+        let original_plan = model.review.as_ref().unwrap().plan().clone();
+
+        let schema_path = PathBuf::from("schema.json");
+        model.select_schema(schema_path.clone());
+        assert!(model.review.as_ref().unwrap().evaluation_pending());
+
+        let AnalysisRequest::Evaluate {
+            generation,
+            selection_version,
+            plan,
+            selection,
+            schema_path: request_schema_path,
+        } = model.take_analysis_request(now).unwrap()
+        else {
+            panic!("schema changes with a review must queue evaluation");
+        };
+        assert_eq!(generation, 1);
+        assert_eq!(selection_version, 1);
+        assert!(Arc::ptr_eq(&plan, &original_plan));
+        assert_eq!(
+            selection.decision(decision_set),
+            Some(RepairDecision::Accepted)
+        );
+        assert_eq!(request_schema_path, Some(schema_path));
+
+        assert!(model.apply_result(AnalysisResult {
+            generation,
+            selection_version,
+            plan: None,
+            evaluation: Some(plan.evaluate(&selection)),
             diagnostics: Vec::new(),
             schema_state: SchemaState::Valid,
         }));
