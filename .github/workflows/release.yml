@@ -71,7 +71,7 @@ jobs:
         shell: bash
         run: |
           rustup target add x86_64-unknown-linux-gnu
-          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          cargo build --release --locked --target x86_64-unknown-linux-gnu --features schema
           ./target/x86_64-unknown-linux-gnu/release/jello --version
       - name: Package Linux archive
         shell: bash
@@ -109,7 +109,7 @@ jobs:
         shell: pwsh
         run: |
           rustup target add x86_64-pc-windows-msvc
-          cargo build --release --locked --target x86_64-pc-windows-msvc --features windows-drop
+          cargo build --release --locked --target x86_64-pc-windows-msvc --features "windows-drop schema"
           cargo build --manifest-path crates/jello-gui/Cargo.toml --release --locked --target x86_64-pc-windows-msvc
           ./target/x86_64-pc-windows-msvc/release/jello.exe --version
           if (-not (Test-Path ./target/x86_64-pc-windows-msvc/release/jello-drop.exe)) {
@@ -148,8 +148,8 @@ jobs:
         shell: bash
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          cargo build --release --locked --target x86_64-apple-darwin
-          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin --features schema
+          cargo build --release --locked --target aarch64-apple-darwin --features schema
       - name: Package universal macOS archive
         shell: bash
         run: |

@@ -115,6 +115,40 @@ struct Parser<'a> {
     diagnostics: Vec<Diagnostic>,
 }
 
+/// A repair to record during parsing: the source span for diagnostics, the
+/// byte range it rewrites, and the wider scope that links it to overlapping
+/// repairs under one decision.
+struct RecordedEdit {
+    kind: RepairKind,
+    code: &'static str,
+    description: &'static str,
+    span: Span,
+    byte_range: std::ops::Range<usize>,
+    decision_scope: std::ops::Range<usize>,
+    replacement: String,
+}
+
+impl RecordedEdit {
+    fn spanning(
+        kind: RepairKind,
+        code: &'static str,
+        description: &'static str,
+        span: Span,
+        replacement: String,
+    ) -> Self {
+        let byte_range = span.start.byte..span.end.byte;
+        Self {
+            kind,
+            code,
+            description,
+            span,
+            byte_range: byte_range.clone(),
+            decision_scope: byte_range,
+            replacement,
+        }
+    }
+}
+
 impl Parser<'_> {
     fn parse_value(&mut self, depth: usize) -> Option<Value> {
         if depth >= MAX_NESTING_DEPTH
@@ -250,15 +284,13 @@ impl Parser<'_> {
                     && self.consume_if(TokenDiscriminant::RightBrace)
                 {
                     if self.repair {
-                        self.record_edit(
+                        self.record_edit(RecordedEdit::spanning(
                             RepairKind::TrailingComma,
                             "F003",
                             "removed trailing comma",
                             comma_span,
-                            comma_span.start.byte..comma_span.end.byte,
-                            comma_span.start.byte..comma_span.end.byte,
                             String::new(),
-                        );
+                        ));
                     }
                     break;
                 }
@@ -302,15 +334,13 @@ impl Parser<'_> {
                     && self.consume_if(TokenDiscriminant::RightBracket)
                 {
                     if self.repair {
-                        self.record_edit(
+                        self.record_edit(RecordedEdit::spanning(
                             RepairKind::TrailingComma,
                             "F003",
                             "removed trailing comma",
                             comma_span,
-                            comma_span.start.byte..comma_span.end.byte,
-                            comma_span.start.byte..comma_span.end.byte,
                             String::new(),
-                        );
+                        ));
                     }
                     break;
                 }
@@ -374,15 +404,13 @@ impl Parser<'_> {
         value: &str,
     ) {
         match json_string_literal(value) {
-            Ok(replacement) => self.record_edit(
+            Ok(replacement) => self.record_edit(RecordedEdit::spanning(
                 kind,
                 code,
                 description,
                 span,
-                span.start.byte..span.end.byte,
-                span.start.byte..span.end.byte,
                 replacement,
-            ),
+            )),
             Err(error) => self.record_format_error(error, span),
         }
     }
@@ -390,27 +418,18 @@ impl Parser<'_> {
     fn record_missing_comma(&mut self) {
         let next = self.current().span.start;
         let previous_end = self.tokens[self.index - 1].span.end.byte;
-        self.record_edit(
-            RepairKind::MissingComma,
-            "F004",
-            "inserted missing comma",
-            Span::new(next, next),
-            next.byte..next.byte,
-            previous_end..next.byte,
-            ",".to_string(),
-        );
+        self.record_edit(RecordedEdit {
+            kind: RepairKind::MissingComma,
+            code: "F004",
+            description: "inserted missing comma",
+            span: Span::new(next, next),
+            byte_range: next.byte..next.byte,
+            decision_scope: previous_end..next.byte,
+            replacement: ",".to_string(),
+        });
     }
 
-    fn record_edit(
-        &mut self,
-        kind: RepairKind,
-        code: &'static str,
-        description: &'static str,
-        span: Span,
-        byte_range: std::ops::Range<usize>,
-        decision_scope: std::ops::Range<usize>,
-        replacement: String,
-    ) {
+    fn record_edit(&mut self, edit: RecordedEdit) {
         if self.edits.len() >= MAX_REPAIR_EDITS || self.records.len() >= MAX_REPAIR_EDITS {
             if !self
                 .diagnostics
@@ -422,7 +441,7 @@ impl Parser<'_> {
                     DiagnosticKind::TooManyRepairs {
                         max_repairs: MAX_REPAIR_EDITS,
                     },
-                    Some(span),
+                    Some(edit.span),
                 ));
             }
             return;
@@ -431,14 +450,21 @@ impl Parser<'_> {
             self.diagnostics.push(Diagnostic::new(
                 "E020",
                 DiagnosticKind::AllocationFailed,
-                Some(span),
+                Some(edit.span),
             ));
             return;
         }
-        let record =
-            RecordedRepair::replace(kind, code, description, span, byte_range, replacement)
-                .with_decision_scope(decision_scope);
-        self.edits.push(FixEdit::at(code, description, span.start));
+        let record = RecordedRepair::replace(
+            edit.kind,
+            edit.code,
+            edit.description,
+            edit.span,
+            edit.byte_range,
+            edit.replacement,
+        )
+        .with_decision_scope(edit.decision_scope);
+        self.edits
+            .push(FixEdit::at(edit.code, edit.description, edit.span.start));
         self.records.push(record);
     }
 

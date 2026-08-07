@@ -489,10 +489,7 @@ impl RepairPlan {
                 highlights: Vec::new(),
             });
         }
-        let has_pending = selection
-            .decisions
-            .iter()
-            .any(|decision| *decision == RepairDecision::Pending);
+        let has_pending = selection.decisions.contains(&RepairDecision::Pending);
         match self.apply(selection).and_then(|applied| {
             parser::parse_strict_repair_output(&applied.source)
                 .and_then(|value| formatter::format_json(&value).map_err(format_diagnostic))

@@ -6,6 +6,82 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Added a line-level Myers diff engine to the core crate (`diff_lines`) with
+  line-count and edit-step limits so huge inputs degrade gracefully instead of
+  exhausting memory.
+- Added `--diff` to the CLI: prints a unified diff of the fixed output instead
+  of JSON (requires `--fix`; supported by `easy`).
+- Added `--schema <path>` to the CLI: validates the output against a local
+  JSON Schema Draft 2020-12 file, exiting 1 on violations and 2 on load
+  errors. Schema support is an optional `schema` feature of the core crate,
+  enabled for released builds.
+- Moved JSON Schema validation from the desktop crate into the core crate
+  (`SchemaValidator`, feature `schema`) so the CLI shares the same engine,
+  budget limits, and path confinement as the desktop application.
+- Persisted the desktop application's language choice in the same
+  `%LOCALAPPDATA%\Jello\config` file used by `jello-drop.exe`, so both tools
+  remember the selection.
+- Invalid repair reviews now list their underlying diagnostics (for example
+  output-size errors) in the desktop Problems panel.
+- Added a Changes panel to the desktop application showing the line diff
+  between the source and the current preview, updated as repairs are accepted
+  or rejected.
+- The desktop preview pane can copy the formatted output to the clipboard with
+  a single click.
+
+## [0.2.1] - 2026-08-05
+
+### Added
+
+- Added interactive repair review to the desktop application: accept or reject
+  each repair group or all groups, with pending, accepted, and rejected ranges
+  highlighted in the source pane; clicking a repair focuses its ranges and
+  scrolls the editor to them. The preview pane marks ranges that still await a
+  decision with a single subdued highlight.
+- Added a public `save_updated` writer that atomically replaces a file after
+  verifying its on-disk content still matches, so the desktop application can
+  refresh its own output instead of stacking numbered files.
+- Added session adoption of saved output files: consecutive saves update the
+  same `.fixed` file in place, while the opened original stays protected.
+- Cached syntax-highlighting tokenization and reduced overlay lookup to a
+  single sweep so repaint frames do not re-tokenize or re-scan unchanged text.
+
+### Changed
+
+- Localized remaining desktop strings (save, accept/reject controls, invalid
+  preview states) in both English and Chinese.
+- The desktop application now caches the formatted preview between frames and
+  refreshes it only when an analysis result is applied.
+
+### Fixed
+
+- Consecutive desktop saves no longer create `name.fixed-2.json`,
+  `name.fixed-3.json` stacks; they update the session's output file in place.
+- Desktop saves are refused when the target file changed externally after it
+  was opened or written.
+- Save As remains available when the session output file was removed or
+  modified externally, so a preview can still be rescued to a new file.
+- The status bar reports repairs as pending review instead of "waiting" when
+  the current review is invalid.
+- The status bar distinguishes an analysis in progress from idle waiting,
+  including re-evaluations queued by repair decisions or schema changes.
+- The status bar clears saved and error messages when the source is edited, so
+  stale notices cannot cover up the current analysis or review state.
+- Dropping several files no longer overwrites an open error with the "opened
+  the first file" notice when the first file could not be opened.
+- Preview highlights skip stale candidate ranges that fall outside the current
+  repair plan instead of indexing past it.
+- The drag-and-drop helper refuses symbolic links, matching the CLI and GUI.
+- The preview pane marks only repairs that still await a decision with a
+  single subdued highlight instead of repeating the source pane's three
+  decision colors; accepted repairs are the final result and stay unmarked,
+  and overlay backgrounds are lighter unless the repair is focused.
+- Repair highlights now use theme-appropriate colors: the dark theme gets
+  softer overlay backgrounds and brighter underlines instead of sharing the
+  light theme palette.
+
 ## [0.2.0] - 2026-07-31
 
 ### Added
@@ -106,7 +182,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Escaped untrusted terminal control characters in diagnostic messages, source
   labels, and source snippets while preserving accurate caret positions.
 
-[Unreleased]: https://github.com/miyako520/jello/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/miyako520/jello/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/miyako520/jello/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/miyako520/jello/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/miyako520/jello/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/miyako520/jello/releases/tag/v0.1.1

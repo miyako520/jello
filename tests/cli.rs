@@ -349,3 +349,126 @@ fn write_refuses_symbolic_links() {
     assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"a":1}"#);
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn diff_mode_prints_a_unified_diff_instead_of_json() {
+    let output = run(&["--fix", "--diff", "--json5"], Some("[1,]"));
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("@@ -1,1 +1,3 @@"));
+    assert!(stdout.contains("- [1,]"));
+    assert!(stdout.contains("+ ["));
+    assert!(!stdout.contains("[\n  1\n]"));
+}
+
+#[test]
+fn diff_mode_requires_fix() {
+    let output = run(&["--diff"], Some("{}"));
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("--diff requires --fix"));
+}
+
+#[test]
+fn diff_mode_rejects_check_and_write_combinations() {
+    let path = unique_path("diff-check.json");
+    fs::write(&path, "{}").unwrap();
+    let output = run(
+        &["--fix", "--diff", "--check", path.to_str().unwrap()],
+        None,
+    );
+    fs::remove_file(path).unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn diff_mode_is_supported_by_easy() {
+    let path = unique_path("diff-easy.json");
+    fs::write(&path, "[1,]").unwrap();
+    let output = run(&["easy", "--diff", path.to_str().unwrap()], None);
+    fs::remove_file(path).unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("@@ -1,1 +1,3 @@"));
+    assert!(stdout.contains("- [1,]"));
+    assert!(stdout.contains("+ ["));
+}
+
+#[cfg(feature = "schema")]
+#[test]
+fn schema_mode_validates_the_formatted_output() {
+    let schema = unique_path("schema-valid.json");
+    fs::write(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#,
+    )
+    .unwrap();
+    let output = run(
+        &["--schema", schema.to_str().unwrap()],
+        Some(r#"{"name":"Ada"}"#),
+    );
+    fs::remove_file(schema).unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[cfg(feature = "schema")]
+#[test]
+fn schema_violations_exit_one_with_issue_paths() {
+    let schema = unique_path("schema-violation.json");
+    fs::write(
+        &schema,
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#,
+    )
+    .unwrap();
+    let output = run(
+        &["--schema", schema.to_str().unwrap()],
+        Some(r#"{"name":42}"#),
+    );
+    fs::remove_file(schema).unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("/name"), "{stderr}");
+}
+
+#[cfg(feature = "schema")]
+#[test]
+fn missing_schema_file_exits_two() {
+    let output = run(
+        &["--schema", "does-not-exist-schema.json"],
+        Some(r#"{"name":"Ada"}"#),
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[cfg(feature = "schema")]
+#[test]
+fn schema_mode_validates_fixed_output() {
+    let schema = unique_path("schema-fix.json");
+    fs::write(&schema, r#"{"type":"array","items":{"type":"integer"}}"#).unwrap();
+    let output = run(
+        &["--fix", "--schema", schema.to_str().unwrap()],
+        Some("[1 2]"),
+    );
+    fs::remove_file(schema).unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[cfg(not(feature = "schema"))]
+#[test]
+fn schema_mode_reports_an_unavailable_build() {
+    let output = run(&["--schema", "x.json"], Some("{}"));
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("without the schema feature"));
+}

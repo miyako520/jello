@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use jello::{
-    Diagnostic, RepairDecision, RepairDecisionSetId, RepairEvaluation, RepairGroupId, RepairPlan,
+    RepairDecision, RepairDecisionSetId, RepairEvaluation, RepairGroupId, RepairPlan,
     RepairSelection,
 };
 
-#[allow(dead_code)]
+#[cfg(test)]
+use jello::Diagnostic;
+
 #[derive(Clone)]
 pub(crate) struct ReviewState {
     plan: Arc<RepairPlan>,
@@ -16,7 +18,6 @@ pub(crate) struct ReviewState {
     selection_version: u64,
 }
 
-#[allow(dead_code)]
 impl ReviewState {
     pub(crate) fn new(
         plan: Arc<RepairPlan>,
@@ -95,6 +96,7 @@ impl ReviewState {
         self.evaluation_pending = true;
     }
 
+    #[cfg(test)]
     pub(crate) fn invalid_diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
         match &self.evaluation {
             RepairEvaluation::Invalid { diagnostics, .. } => diagnostics.iter(),

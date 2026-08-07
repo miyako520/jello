@@ -2,7 +2,9 @@
 
 mod ast;
 mod cli;
+mod config;
 mod diagnostic;
+mod diff;
 #[cfg(any(feature = "windows-drop", test))]
 mod drop_mode;
 mod fixer;
@@ -12,21 +14,27 @@ mod lexer;
 mod output;
 mod parser;
 mod repair_plan;
+#[cfg(feature = "schema")]
+mod schema;
 mod span;
 mod stats;
 
+pub use config::{load_language_config, save_language_config};
 pub use diagnostic::{ColorChoice, Diagnostic, DiagnosticKind, Language};
+pub use diff::{diff_lines, unified_diff, DiffOp, MAX_DIFF_LINES};
 pub use fixer::FixEdit;
 pub use formatter::{FormatError, FormatOptions, MAX_INDENT_WIDTH, MAX_OUTPUT_BYTES};
 pub use input::read_utf8_file_stable;
 pub use lexer::{MAX_DIAGNOSTICS, MAX_REPAIR_EDITS, MAX_TOKENS};
-pub use output::{save_as_new, save_fixed, CleanupWarning, SavedOutput};
+pub use output::{save_as_new, save_fixed, save_updated, CleanupWarning, SavedOutput};
 pub use parser::{MAX_INPUT_BYTES, MAX_NESTING_DEPTH};
 pub use repair_plan::{
     CandidateHighlight, RepairCandidate, RepairChange, RepairDecision, RepairDecisionSet,
     RepairDecisionSetId, RepairEvaluation, RepairGroup, RepairGroupId, RepairKind, RepairPlan,
     RepairSelection,
 };
+#[cfg(feature = "schema")]
+pub use schema::{SchemaIssue, SchemaValidator, MAX_SCHEMA_FILES, MAX_SCHEMA_TOTAL_BYTES};
 pub use span::{Position, Span};
 pub use stats::Stats;
 

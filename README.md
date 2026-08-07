@@ -11,7 +11,7 @@ Older unpublished revisions used the working name `jqr`.
 Install the latest source revision with Rust 1.73 or newer:
 
 ```powershell
-cargo install --git https://github.com/miyako520/jello --locked
+cargo install --git https://github.com/miyako520/jello --locked --features schema
 ```
 
 The project is not yet published to crates.io or Homebrew. Tagged releases
@@ -94,6 +94,8 @@ Repair supported mistakes and print the result:
 ```powershell
 jello --fix broken.json
 jello --fix --write broken.json
+jello --fix --diff --json5 broken.json
+jello --fix --schema schema.json data.json
 ```
 
 ## Command-line options
@@ -105,6 +107,7 @@ jello easy [OPTIONS] [--] <path>
 easy                   Repair, print, and save as a new .fixed file
 
 --fix                  Repair supported mistakes before formatting
+--diff                 Print a unified diff of the fixed output instead of JSON
 --stats                Print structural statistics to stderr
 --check                Exit 1 when input is not already formatted
 --write, -i            Replace a checked regular input file
@@ -112,19 +115,33 @@ easy                   Repair, print, and save as a new .fixed file
 --indent <0..16>       Pretty-print indentation width (default: 2)
 --compact              Emit compact JSON
 --lang <zh|en>         Diagnostic language
+--schema <path>        Validate the output against a JSON Schema file
 --color <MODE>         auto, always, or never
 --version, -V          Print version
 --help, -h             Print help
 ```
 
 Use `--` before a path beginning with a hyphen. `--check` and `--write` are
-mutually exclusive, as are `--compact` and `--indent`.
+mutually exclusive, as are `--compact` and `--indent`. `--diff` requires
+`--fix` and cannot be combined with `--check` or `--write`.
 
 Exit codes:
 
 - `0`: success;
 - `1`: invalid content or a failed formatting check;
 - `2`: invalid arguments or an I/O failure.
+
+### Diff and schema validation
+
+`--fix --diff` prints a line-level unified diff instead of the repaired JSON.
+It is also available in `easy` mode. When a file is too large or differs by
+too many lines, Jello skips diff generation and reports that fact on stderr.
+
+`--schema <path>` validates the canonical output against a local JSON Schema
+Draft 2020-12 document. Schema violations exit with `1`; a schema load or
+compile failure exits with `2`. Relative references are confined to the
+schema's directory and network references are blocked. Released archives
+include schema support; source installs need the `schema` feature shown above.
 
 ## Strict JSON behavior
 
@@ -205,8 +222,10 @@ assert_eq!(output, r#"{"name":"Ada"}"#);
 # Ok::<(), Vec<jello::Diagnostic>>(())
 ```
 
-The public API also provides `parse_json5`, `repair`, `repair_json5`, and
-`statistics`. Formatting is fallible so callers can handle the output-size and
+The public API also provides `parse_json5`, `repair`, `repair_json5`,
+`statistics`, `diff_lines`, and `unified_diff`. With the optional `schema`
+feature, it additionally exposes `SchemaValidator` for local Draft 2020-12
+validation. Formatting is fallible so callers can handle the output-size and
 allocation limits.
 `repair` returns `RepairOutcome::Valid` when no repair edits were needed;
 its output is still canonical formatted JSON and may differ from the original

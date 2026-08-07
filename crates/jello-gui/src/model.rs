@@ -13,6 +13,9 @@ const ANALYSIS_DEBOUNCE: Duration = Duration::from_millis(250);
 pub struct AppModel {
     pub language: UiLanguage,
     pub source_path: Option<PathBuf>,
+    pub source_snapshot: Option<String>,
+    pub saved_path: Option<PathBuf>,
+    pub saved_snapshot: Option<Vec<u8>>,
     pub source: String,
     pub preview: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
@@ -24,6 +27,7 @@ pub struct AppModel {
     analysis_pending: bool,
     reevaluation_queued: bool,
     analysis_generation: u64,
+    applied_generation: u64,
 }
 
 impl Default for AppModel {
@@ -31,6 +35,9 @@ impl Default for AppModel {
         Self {
             language: UiLanguage::default(),
             source_path: None,
+            source_snapshot: None,
+            saved_path: None,
+            saved_snapshot: None,
             source: String::new(),
             preview: None,
             diagnostics: Vec::new(),
@@ -42,6 +49,7 @@ impl Default for AppModel {
             analysis_pending: false,
             reevaluation_queued: false,
             analysis_generation: 0,
+            applied_generation: 0,
         }
     }
 }
@@ -56,6 +64,7 @@ impl AppModel {
         self.diagnostics.clear();
         self.review = None;
         self.schema_state = SchemaState::NotLoaded;
+        self.status = None;
     }
 
     pub fn request_analysis_now(&mut self) {
@@ -69,10 +78,55 @@ impl AppModel {
         self.analysis_generation
     }
 
+    pub fn analysis_in_flight(&self) -> bool {
+        self.analysis_pending
+            || self.applied_generation < self.analysis_generation
+            || self
+                .review
+                .as_ref()
+                .is_some_and(ReviewState::evaluation_pending)
+    }
+
     pub fn can_save(&self) -> bool {
         self.source_path.is_some()
             && self.preview.is_some()
+            && (self.schema_path.is_none() || matches!(self.schema_state, SchemaState::Valid))
             && self.review.as_ref().is_none_or(ReviewState::can_save)
+    }
+
+    pub fn verify_save_target(&self) -> std::io::Result<()> {
+        if let Some(path) = &self.saved_path {
+            let Some(expected) = self.saved_snapshot.as_deref() else {
+                return Err(std::io::Error::other(
+                    "saved content is unavailable; reopen the file",
+                ));
+            };
+            if std::fs::read(path)? != expected {
+                return Err(std::io::Error::other(
+                    "saved file changed after it was written; reopen it before saving",
+                ));
+            }
+            return Ok(());
+        }
+        self.verify_source_unchanged()
+    }
+
+    pub fn verify_source_unchanged(&self) -> std::io::Result<()> {
+        let Some(path) = self.source_path.as_deref() else {
+            return Ok(());
+        };
+        let Some(snapshot) = self.source_snapshot.as_deref() else {
+            return Err(std::io::Error::other(
+                "source snapshot is unavailable; reopen the file",
+            ));
+        };
+        let current = jello::read_utf8_file_stable(path)?;
+        if current != snapshot {
+            return Err(std::io::Error::other(
+                "source file changed after it was opened; reopen it before saving",
+            ));
+        }
+        Ok(())
     }
 
     pub fn take_analysis_request(&mut self, now: Instant) -> Option<AnalysisRequest> {
@@ -110,12 +164,12 @@ impl AppModel {
             return false;
         }
         let AnalysisResult {
+            generation,
             selection_version,
             plan,
             evaluation,
             diagnostics,
             schema_state,
-            ..
         } = result;
         match (plan, evaluation) {
             (Some(plan), Some(evaluation)) if selection_version == 0 => {
@@ -126,10 +180,12 @@ impl AppModel {
                 {
                     return false;
                 }
+                self.applied_generation = generation;
                 self.preview = evaluation_preview(&evaluation);
                 let selection = plan.default_selection();
+                let merged_diagnostics = merge_invalid_diagnostics(diagnostics, &evaluation);
                 self.review = Some(ReviewState::new(plan, selection, evaluation));
-                self.diagnostics = diagnostics;
+                self.diagnostics = merged_diagnostics;
                 self.schema_state = schema_state;
                 self.reevaluation_queued = false;
                 true
@@ -141,14 +197,16 @@ impl AppModel {
                 if selection_version != review.selection_version() {
                     return false;
                 }
+                self.applied_generation = generation;
                 self.preview = evaluation_preview(&evaluation);
+                self.diagnostics = merge_invalid_diagnostics(diagnostics, &evaluation);
                 review.replace_evaluation(evaluation);
-                self.diagnostics = diagnostics;
                 self.schema_state = schema_state;
                 self.reevaluation_queued = false;
                 true
             }
             (None, None) if selection_version == 0 => {
+                self.applied_generation = generation;
                 self.preview = None;
                 self.review = None;
                 self.diagnostics = diagnostics;
@@ -160,7 +218,6 @@ impl AppModel {
         }
     }
 
-    #[allow(dead_code)]
     pub fn decide_repair(&mut self, set_id: RepairDecisionSetId, decision: RepairDecision) -> bool {
         let Some(review) = self.review.as_mut() else {
             return false;
@@ -172,15 +229,24 @@ impl AppModel {
         true
     }
 
-    #[allow(dead_code)]
-    pub fn select_repair(&mut self, group_id: RepairGroupId) {
+    pub fn set_all_repairs(&mut self, decision: RepairDecision) {
         if let Some(review) = self.review.as_mut() {
-            review.set_selected_group(Some(group_id));
+            review.set_all(decision);
+            self.reevaluation_queued = true;
+        }
+    }
+
+    pub fn select_repair(&mut self, group_id: Option<RepairGroupId>) {
+        if let Some(review) = self.review.as_mut() {
+            review.set_selected_group(group_id);
         }
     }
 
     pub fn open_source(&mut self, path: PathBuf, source: String) {
         self.source_path = Some(path);
+        self.source_snapshot = Some(source.clone());
+        self.saved_path = None;
+        self.saved_snapshot = None;
         self.source = source;
         self.preview = None;
         self.diagnostics.clear();
@@ -214,6 +280,20 @@ fn evaluation_preview(evaluation: &RepairEvaluation) -> Option<String> {
     }
 }
 
+fn merge_invalid_diagnostics(
+    mut diagnostics: Vec<Diagnostic>,
+    evaluation: &RepairEvaluation,
+) -> Vec<Diagnostic> {
+    if let RepairEvaluation::Invalid {
+        diagnostics: invalid,
+        ..
+    } = evaluation
+    {
+        diagnostics.extend(invalid.iter().cloned());
+    }
+    diagnostics
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -241,6 +321,13 @@ mod tests {
             diagnostics: Vec::new(),
             schema_state: SchemaState::NotLoaded,
         }
+    }
+
+    fn temp_file(name: &str, contents: &[u8]) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("jello-model-{name}-{}.json", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path
     }
 
     #[test]
@@ -375,6 +462,42 @@ mod tests {
         let review = model.review.as_ref().unwrap();
         assert_eq!(review.selection_version(), 0);
         assert!(matches!(review.evaluation(), RepairEvaluation::Preview(_)));
+    }
+
+    #[test]
+    fn opening_a_source_resets_the_session_saved_output() {
+        let mut model = AppModel {
+            saved_path: Some(PathBuf::from("data.fixed.json")),
+            saved_snapshot: Some(b"{}\n".to_vec()),
+            ..Default::default()
+        };
+
+        model.open_source(PathBuf::from("data.json"), "{}".to_string());
+
+        assert!(model.saved_path.is_none());
+        assert!(model.saved_snapshot.is_none());
+        assert_eq!(model.source_snapshot.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn a_loaded_schema_must_be_valid_before_saving() {
+        let mut model = AppModel {
+            source_path: Some("example.json".into()),
+            preview: Some("{}\n".to_string()),
+            ..Default::default()
+        };
+
+        assert!(model.can_save());
+
+        model.schema_path = Some(PathBuf::from("schema.json"));
+        model.schema_state = SchemaState::Invalid(Vec::new());
+        assert!(!model.can_save());
+
+        model.schema_state = SchemaState::LoadError("boom".to_string());
+        assert!(!model.can_save());
+
+        model.schema_state = SchemaState::Valid;
+        assert!(model.can_save());
     }
 
     #[test]
@@ -570,9 +693,13 @@ mod tests {
         assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
         let group = model.review.as_ref().unwrap().plan().groups()[0].id();
 
-        model.select_repair(group);
+        model.select_repair(Some(group));
 
         assert_eq!(model.review.as_ref().unwrap().selected_group(), Some(group));
+
+        model.select_repair(None);
+
+        assert_eq!(model.review.as_ref().unwrap().selected_group(), None);
     }
 
     #[test]
@@ -597,5 +724,264 @@ mod tests {
 
         assert!(!applied);
         assert!(model.preview.is_none());
+    }
+
+    #[test]
+    fn decided_repairs_stay_in_flight_until_re_evaluated() {
+        let now = Instant::now();
+        let mut model = AppModel::default();
+        assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
+        assert!(!model.analysis_in_flight());
+
+        let decision_set = model.review.as_ref().unwrap().plan().decision_sets()[0].id();
+        assert!(model.decide_repair(decision_set, RepairDecision::Accepted));
+        assert!(
+            model.analysis_in_flight(),
+            "a queued re-evaluation must show as analyzing"
+        );
+
+        let AnalysisRequest::Evaluate {
+            generation,
+            selection_version,
+            plan,
+            selection,
+            ..
+        } = model.take_analysis_request(now).unwrap()
+        else {
+            panic!("decisions must queue evaluation");
+        };
+        let evaluation = plan.evaluate(&selection);
+        assert!(model.apply_result(AnalysisResult {
+            generation,
+            selection_version,
+            plan: None,
+            evaluation: Some(evaluation),
+            diagnostics: Vec::new(),
+            schema_state: SchemaState::NotLoaded,
+        }));
+        assert!(!model.analysis_in_flight());
+    }
+
+    #[test]
+    fn invalid_review_diagnostics_are_exposed_to_the_problems_tab() {
+        let now = Instant::now();
+        let mut model = AppModel::default();
+        assert!(model.apply_result(analyzed_result("{name:'Ada'}", 0)));
+        let decision_set = model.review.as_ref().unwrap().plan().decision_sets()[0].id();
+        assert!(model.decide_repair(decision_set, RepairDecision::Rejected));
+        let AnalysisRequest::Evaluate {
+            generation,
+            selection_version,
+            plan,
+            selection,
+            ..
+        } = model.take_analysis_request(now).unwrap()
+        else {
+            panic!("decisions must queue evaluation");
+        };
+        let evaluation = plan.evaluate(&selection);
+        let RepairEvaluation::Invalid { diagnostics, .. } = &evaluation else {
+            panic!("rejecting a required repair must invalidate the plan");
+        };
+        let invalid_len = diagnostics.len();
+
+        assert!(model.apply_result(AnalysisResult {
+            generation,
+            selection_version,
+            plan: None,
+            evaluation: Some(evaluation),
+            diagnostics: Vec::new(),
+            schema_state: SchemaState::NotLoaded,
+        }));
+        assert!(
+            model.diagnostics.len() >= invalid_len,
+            "invalid review diagnostics must be listed in the problems tab"
+        );
+    }
+
+    #[test]
+    fn editing_clears_the_status_message() {
+        let start = Instant::now();
+        let mut model = AppModel {
+            status: Some("saved".to_string()),
+            ..Default::default()
+        };
+
+        model.mark_edited(start);
+
+        assert!(model.status.is_none());
+    }
+
+    #[test]
+    fn analysis_in_flight_tracks_submission_and_application() {
+        let start = Instant::now();
+        let mut model = AppModel::default();
+        assert!(!model.analysis_in_flight());
+
+        model.mark_edited(start);
+        assert!(model.analysis_in_flight());
+
+        let request = model
+            .take_analysis_request(start + Duration::from_millis(250))
+            .unwrap();
+        assert!(
+            model.analysis_in_flight(),
+            "a submitted but not yet applied result must stay in flight"
+        );
+
+        assert!(model.apply_result(analyzed_result("{}", request.generation())));
+        assert!(!model.analysis_in_flight());
+    }
+
+    #[test]
+    fn analysis_in_flight_clears_when_an_unrepairable_result_arrives() {
+        let start = Instant::now();
+        let mut model = AppModel {
+            source: "{".to_string(),
+            ..Default::default()
+        };
+        model.request_analysis_now();
+        let request = model.take_analysis_request(start).unwrap();
+        let generation = request.generation();
+        assert!(model.analysis_in_flight());
+
+        assert!(model.apply_result(AnalysisResult {
+            generation,
+            selection_version: 0,
+            plan: None,
+            evaluation: None,
+            diagnostics: jello::plan_repair_json5("{").unwrap_err(),
+            schema_state: SchemaState::NotLoaded,
+        }));
+        assert!(!model.analysis_in_flight());
+    }
+
+    #[test]
+    fn save_verification_accepts_an_unchanged_session_output() {
+        let source = temp_file("save-ok-source", b"{}\n");
+        let saved = temp_file("save-ok-saved", b"{\n  \"a\": 1\n}\n");
+        let model = AppModel {
+            source_path: Some(source.clone()),
+            source_snapshot: Some("{}\n".to_string()),
+            saved_path: Some(saved.clone()),
+            saved_snapshot: Some(b"{\n  \"a\": 1\n}\n".to_vec()),
+            ..Default::default()
+        };
+
+        assert!(model.verify_save_target().is_ok());
+        assert!(model.verify_source_unchanged().is_ok());
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(saved).unwrap();
+    }
+
+    #[test]
+    fn save_verification_refuses_a_deleted_session_output() {
+        let source = temp_file("save-deleted-source", b"{}\n");
+        let saved = std::env::temp_dir().join(format!(
+            "jello-model-save-deleted-saved-{}.json",
+            std::process::id()
+        ));
+        let model = AppModel {
+            source_path: Some(source),
+            source_snapshot: Some("{}\n".to_string()),
+            saved_path: Some(saved),
+            saved_snapshot: Some(b"{\n  \"a\": 1\n}\n".to_vec()),
+            ..Default::default()
+        };
+
+        assert!(model.verify_save_target().is_err());
+        assert!(model.verify_source_unchanged().is_ok());
+        std::fs::remove_file(model.source_path.as_ref().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn save_verification_refuses_a_modified_session_output() {
+        let source = temp_file("save-modified-source", b"{}\n");
+        let saved = temp_file("save-modified-saved", b"new content");
+        let model = AppModel {
+            source_path: Some(source.clone()),
+            source_snapshot: Some("{}\n".to_string()),
+            saved_path: Some(saved.clone()),
+            saved_snapshot: Some(b"expected content".to_vec()),
+            ..Default::default()
+        };
+
+        assert!(model.verify_save_target().is_err());
+        assert!(model.verify_source_unchanged().is_ok());
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(saved).unwrap();
+    }
+
+    #[test]
+    fn save_as_verification_ignores_a_missing_session_output() {
+        let source = temp_file("save-as-source", b"{}\n");
+        let saved = std::env::temp_dir().join(format!(
+            "jello-model-save-as-saved-{}.json",
+            std::process::id()
+        ));
+        let model = AppModel {
+            source_path: Some(source.clone()),
+            source_snapshot: Some("{}\n".to_string()),
+            saved_path: Some(saved),
+            saved_snapshot: Some(b"{\n  \"a\": 1\n}\n".to_vec()),
+            ..Default::default()
+        };
+
+        assert!(model.verify_save_target().is_err());
+        assert!(model.verify_source_unchanged().is_ok());
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn save_verification_refuses_a_modified_source() {
+        let source = temp_file("save-source-modified", b"changed");
+        let model = AppModel {
+            source_path: Some(source.clone()),
+            source_snapshot: Some("original".to_string()),
+            ..Default::default()
+        };
+
+        assert!(model.verify_save_target().is_err());
+        assert!(model.verify_source_unchanged().is_err());
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn save_verification_falls_back_to_the_source_when_nothing_was_saved() {
+        let source = temp_file("save-fallback-source", b"{}\n");
+        let model = AppModel {
+            source_path: Some(source.clone()),
+            source_snapshot: Some("{}\n".to_string()),
+            ..Default::default()
+        };
+
+        assert!(model.verify_save_target().is_ok());
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn save_verification_requires_a_saved_snapshot_when_adopting_a_path() {
+        let source = temp_file("save-snapshot-source", b"{}\n");
+        let saved = temp_file("save-snapshot-saved", b"{}");
+        let model = AppModel {
+            source_path: Some(source.clone()),
+            source_snapshot: Some("{}\n".to_string()),
+            saved_path: Some(saved.clone()),
+            saved_snapshot: None,
+            ..Default::default()
+        };
+
+        assert!(model.verify_save_target().is_err());
+        assert!(model.verify_source_unchanged().is_ok());
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(saved).unwrap();
+    }
+
+    #[test]
+    fn save_verification_is_lenient_without_any_session_files() {
+        let model = AppModel::default();
+
+        assert!(model.verify_save_target().is_ok());
+        assert!(model.verify_source_unchanged().is_ok());
     }
 }

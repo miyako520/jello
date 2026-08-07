@@ -58,3 +58,35 @@ fn save_fixed_uses_the_next_available_numbered_name() {
     assert_eq!(fs::read(saved.path).unwrap(), b"{\"fixed\":true}\n");
     assert_eq!(fs::read(occupied).unwrap(), b"occupied");
 }
+
+#[test]
+fn save_updated_replaces_only_unchanged_content_in_place() {
+    let directory = TestDirectory::new("updated");
+    let path = directory.path().join("data.fixed.json");
+    fs::write(&path, b"{\"fixed\":true}\n").unwrap();
+
+    jello::save_updated(
+        &path,
+        b"{\"fixed\":true}\n",
+        b"{\"fixed\":true,\"again\":true}\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"{\"fixed\":true,\"again\":true}\n"
+    );
+}
+
+#[test]
+fn save_updated_refuses_to_replace_content_that_changed_externally() {
+    let directory = TestDirectory::new("updated-stale");
+    let path = directory.path().join("data.fixed.json");
+    fs::write(&path, b"{\"fixed\":true}\n").unwrap();
+
+    let error =
+        jello::save_updated(&path, b"{\"fixed\":false}\n", b"{\"again\":true}\n").unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(fs::read(&path).unwrap(), b"{\"fixed\":true}\n");
+}

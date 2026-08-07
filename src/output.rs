@@ -34,6 +34,43 @@ pub fn save_fixed(source: &Path, contents: &[u8]) -> io::Result<SavedOutput> {
     )
 }
 
+/// Atomically replace `path` with `contents`, refusing to touch the file when
+/// its on-disk content no longer matches `expected_contents`.
+///
+/// Unlike [`save_fixed`], this never creates a new file; callers should only
+/// use it for files this program wrote earlier in the same session.
+pub fn save_updated(path: &Path, expected_contents: &[u8], contents: &[u8]) -> io::Result<()> {
+    verify_file_content_matches(path, expected_contents)?;
+    let metadata = fs::metadata(path)?;
+    let (temporary_path, mut temporary) = create_temporary_sibling(path, "update")?;
+    let write_result = (|| {
+        temporary.set_permissions(metadata.permissions())?;
+        temporary.write_all(contents)?;
+        temporary.flush()?;
+        temporary.sync_all()
+    })();
+    drop(temporary);
+
+    if let Err(error) = write_result {
+        return Err(remove_temporary(&temporary_path, error));
+    }
+    verify_file_content_matches(path, expected_contents)?;
+    match fs::rename(&temporary_path, path) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(remove_temporary(&temporary_path, error)),
+    }
+}
+
+fn verify_file_content_matches(path: &Path, expected: &[u8]) -> io::Result<()> {
+    if fs::read(path)? != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "the file changed after it was opened; reopen it before saving",
+        ));
+    }
+    Ok(())
+}
+
 pub fn save_as_new(source: &Path, destination: &Path, contents: &[u8]) -> io::Result<SavedOutput> {
     write_output_with_publish(
         source,

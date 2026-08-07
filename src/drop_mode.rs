@@ -1,13 +1,14 @@
 #[cfg(feature = "windows-drop")]
 use std::env;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 #[cfg(feature = "windows-drop")]
 use std::io::IsTerminal;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::cli::{write_easy_output, EasyCleanupWarning};
+use crate::config::{load_language_config as load_language, save_language_config as save_language};
 use crate::diagnostic::{escape_terminal_text, Diagnostic, DiagnosticKind, Language};
 use crate::fixer::{self, FixEdit};
 use crate::lexer::InputMode;
@@ -94,95 +95,6 @@ fn read_source<R: Read>(mut reader: R) -> Result<String, DropFileError> {
             None,
         )])
     })
-}
-
-fn load_language(path: &Path) -> io::Result<Option<Language>> {
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    match source.trim() {
-        "language=en" => Ok(Some(Language::En)),
-        "language=zh" => Ok(Some(Language::Zh)),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "language config must contain `language=en` or `language=zh`",
-        )),
-    }
-}
-
-fn save_language(path: &Path, language: Language) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let (temporary_path, mut temporary) = create_config_temporary(path)?;
-    let value = match language {
-        Language::En => b"language=en\n".as_slice(),
-        Language::Zh => b"language=zh\n".as_slice(),
-    };
-    let write_result = (|| {
-        temporary.write_all(value)?;
-        temporary.flush()?;
-        temporary.sync_all()
-    })();
-    drop(temporary);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(error);
-    }
-
-    match fs::rename(&temporary_path, path) {
-        Ok(()) => Ok(()),
-        Err(first_error) if path.exists() => {
-            let backup_path = config_sibling_path(path, "bak");
-            if backup_path.exists() {
-                fs::remove_file(&temporary_path)?;
-                return Err(first_error);
-            }
-            fs::rename(path, &backup_path)?;
-            match fs::rename(&temporary_path, path) {
-                Ok(()) => {
-                    let _ = fs::remove_file(backup_path);
-                    Ok(())
-                }
-                Err(error) => {
-                    let _ = fs::rename(&backup_path, path);
-                    Err(error)
-                }
-            }
-        }
-        Err(error) => {
-            let _ = fs::remove_file(temporary_path);
-            Err(error)
-        }
-    }
-}
-
-fn create_config_temporary(path: &Path) -> io::Result<(PathBuf, File)> {
-    for attempt in 0..1000 {
-        let candidate = config_sibling_path(path, &format!("{attempt}.tmp"));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => return Ok((candidate, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not reserve a language config temporary file",
-    ))
-}
-
-fn config_sibling_path(path: &Path, suffix: &str) -> PathBuf {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut name = OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(format!(".jello-drop.{}.{}", std::process::id(), suffix));
-    parent.join(name)
 }
 
 #[cfg(test)]

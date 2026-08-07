@@ -29,6 +29,7 @@ use std::os::windows::io::AsRawHandle;
 struct Options {
     easy: bool,
     fix: bool,
+    diff: bool,
     stats: bool,
     check: bool,
     write: bool,
@@ -36,6 +37,7 @@ struct Options {
     input_mode: InputMode,
     color: ColorChoice,
     format: FormatOptions,
+    schema: Option<PathBuf>,
     input: Option<PathBuf>,
 }
 
@@ -279,6 +281,55 @@ fn run_with_io(
         stderr.flush().map_err(|_| 2)?;
     }
 
+    if let Some(schema_path) = options.schema.as_deref() {
+        match validate_against_schema(schema_path, &canonical) {
+            #[cfg(feature = "schema")]
+            SchemaCheck::Valid => {}
+            #[cfg(feature = "schema")]
+            SchemaCheck::Invalid(issues) => {
+                for issue in issues {
+                    let message = match options.lang {
+                        Language::En => format!(
+                            "schema violation: instance {} does not match {}: {}",
+                            issue.instance_path, issue.schema_path, issue.message
+                        ),
+                        Language::Zh => format!(
+                            "schema 校验失败：实例 {} 不符合 {}：{}",
+                            issue.instance_path, issue.schema_path, issue.message
+                        ),
+                    };
+                    let diagnostic = Diagnostic::new("E024", DiagnosticKind::Io(message), None);
+                    let rendered =
+                        render_diagnostic(&diagnostic, "", &source_label, options.lang, use_color);
+                    stderr.write_all(rendered.as_bytes()).map_err(|_| 2)?;
+                }
+                return Err(1);
+            }
+            #[cfg(feature = "schema")]
+            SchemaCheck::Error(error) => {
+                let diagnostic = Diagnostic::new("E011", DiagnosticKind::Io(error), None);
+                let rendered =
+                    render_diagnostic(&diagnostic, "", &source_label, options.lang, use_color);
+                stderr.write_all(rendered.as_bytes()).map_err(|_| 2)?;
+                return Err(2);
+            }
+            #[cfg(not(feature = "schema"))]
+            SchemaCheck::Unavailable => {
+                let diagnostic = Diagnostic::new(
+                    "E023",
+                    DiagnosticKind::Io(
+                        "this build of jello was compiled without the schema feature".to_string(),
+                    ),
+                    None,
+                );
+                let rendered =
+                    render_diagnostic(&diagnostic, "", &source_label, options.lang, use_color);
+                stderr.write_all(rendered.as_bytes()).map_err(|_| 2)?;
+                return Err(2);
+            }
+        }
+    }
+
     if options.check {
         if original != canonical {
             let message = match options.lang {
@@ -302,7 +353,20 @@ fn run_with_io(
         }
     } else if options.easy {
         let path = options.input.as_deref().expect("validated easy input path");
-        stdout.write_all(canonical.as_bytes()).map_err(|_| 2)?;
+        if options.diff {
+            print_fix_diff(
+                &original,
+                &canonical,
+                stdout,
+                stderr,
+                &source_label,
+                options.lang,
+                use_color,
+            )
+            .map_err(|_| 2)?;
+        } else {
+            stdout.write_all(canonical.as_bytes()).map_err(|_| 2)?;
+        }
         let outcome = match write_easy_output(path, canonical.as_bytes()) {
             Ok(output_path) => output_path,
             Err(error) => {
@@ -331,6 +395,17 @@ fn run_with_io(
             Language::En => writeln!(stderr, "saved formatted output to {:?}", outcome.path),
             Language::Zh => writeln!(stderr, "已将格式化结果保存到 {:?}", outcome.path),
         };
+    } else if options.diff {
+        print_fix_diff(
+            &original,
+            &canonical,
+            stdout,
+            stderr,
+            &source_label,
+            options.lang,
+            use_color,
+        )
+        .map_err(|_| 2)?;
     } else {
         stdout.write_all(canonical.as_bytes()).map_err(|_| 2)?;
     }
@@ -342,6 +417,55 @@ fn run_with_io(
     }
 
     Ok(())
+}
+
+enum SchemaCheck {
+    #[cfg(feature = "schema")]
+    Valid,
+    #[cfg(feature = "schema")]
+    Invalid(Vec<crate::schema::SchemaIssue>),
+    #[cfg(feature = "schema")]
+    Error(String),
+    #[cfg(not(feature = "schema"))]
+    Unavailable,
+}
+
+fn validate_against_schema(schema_path: &Path, instance_json: &str) -> SchemaCheck {
+    #[cfg(feature = "schema")]
+    {
+        let mut validator = crate::schema::SchemaValidator::new();
+        match validator.validate(schema_path, instance_json) {
+            Ok(issues) if issues.is_empty() => SchemaCheck::Valid,
+            Ok(issues) => SchemaCheck::Invalid(issues),
+            Err(error) => SchemaCheck::Error(error),
+        }
+    }
+    #[cfg(not(feature = "schema"))]
+    {
+        let _ = (schema_path, instance_json);
+        SchemaCheck::Unavailable
+    }
+}
+
+fn print_fix_diff(
+    original: &str,
+    canonical: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    source_label: &str,
+    language: Language,
+    color: bool,
+) -> io::Result<()> {
+    let Some(diff) = crate::diff::unified_diff(original, canonical, 3) else {
+        let message = match language {
+            Language::En => "diff skipped: input too large".to_string(),
+            Language::Zh => "diff 已跳过：输入过大".to_string(),
+        };
+        let diagnostic = Diagnostic::new("E023", DiagnosticKind::Io(message), None);
+        let rendered = render_diagnostic(&diagnostic, "", source_label, language, color);
+        return stderr.write_all(rendered.as_bytes()).map(|_| ());
+    };
+    stdout.write_all(diff.as_bytes())
 }
 
 fn easy_save_diagnostic(error: io::Error, language: Language) -> Diagnostic {
@@ -422,6 +546,7 @@ fn parse_args_with_language(
     let mut options = Options {
         easy: false,
         fix: false,
+        diff: false,
         stats: false,
         check: false,
         write: false,
@@ -429,6 +554,7 @@ fn parse_args_with_language(
         input_mode: InputMode::Json,
         color: ColorChoice::Auto,
         format: FormatOptions::default(),
+        schema: None,
         input: None,
     };
     let mut indent = None;
@@ -455,6 +581,7 @@ fn parse_args_with_language(
             "--" => positional_only = true,
 
             "--fix" => options.fix = true,
+            "--diff" => options.diff = true,
             "--stats" => options.stats = true,
             "--check" => options.check = true,
             "--write" | "-i" => options.write = true,
@@ -515,6 +642,14 @@ fn parse_args_with_language(
                     )
                 })?;
             }
+            "--schema" => {
+                let value = next_value(
+                    &mut iter,
+                    "--schema requires a JSON Schema file path",
+                    "`--schema` 需要一个 JSON Schema 文件路径",
+                )?;
+                options.schema = Some(PathBuf::from(value));
+            }
             "--help" | "-h" => return Ok(ParsedArgs::Help),
             "--version" | "-V" => return Ok(ParsedArgs::Version),
             value if value.starts_with('-') => {
@@ -549,6 +684,18 @@ fn parse_args_with_language(
         return Err(invalid_argument(
             "`easy` cannot be combined with `--check` or `--write`",
             "`easy` 不能与 `--check` 或 `--write` 同时使用",
+        ));
+    }
+    if options.diff && !options.fix {
+        return Err(invalid_argument(
+            "--diff requires --fix",
+            "`--diff` 需要 `--fix`",
+        ));
+    }
+    if options.diff && (options.check || options.write) {
+        return Err(invalid_argument(
+            "--diff cannot be combined with --check or --write",
+            "`--diff` 不能与 `--check` 或 `--write` 同时使用",
         ));
     }
     if compact && indent.is_some() {
@@ -1290,7 +1437,7 @@ fn print_help(writer: &mut dyn Write) -> io::Result<()> {
         "jello {version}\n\n\
 USAGE:\n  jello [OPTIONS] [--] [path]\n  jello easy [OPTIONS] [--] <path>\n\n\
 COMMANDS:\n  easy                   Repair, print, and save as a new .fixed file\n\n\
-OPTIONS:\n  --fix                  Repair supported mistakes before formatting\n  --stats                Print structural statistics to stderr\n  --check                Exit 1 when input is not already formatted\n  --write, -i            Replace a checked regular input file\n  --json5                Accept the documented JSON5 subset\n  --indent <0..16>       Pretty-print indentation width (default: 2)\n  --compact              Emit compact JSON\n  --lang <zh|en>         Diagnostic language\n  --color <MODE>         auto, always, or never\n  --version, -V          Print version\n  --help, -h             Print help\n\n\
+OPTIONS:\n  --fix                  Repair supported mistakes before formatting\n  --diff                 Print a unified diff of the fixed output instead of JSON\n  --stats                Print structural statistics to stderr\n  --check                Exit 1 when input is not already formatted\n  --write, -i            Replace a checked regular input file\n  --json5                Accept the documented JSON5 subset\n  --indent <0..16>       Pretty-print indentation width (default: 2)\n  --compact              Emit compact JSON\n  --lang <zh|en>         Diagnostic language\n  --schema <path>       Validate the output against a JSON Schema file\n  --color <MODE>         auto, always, or never\n  --version, -V          Print version\n  --help, -h             Print help\n\n\
 Reads stdin when no path is provided.\n\
 Exit codes: 0 success, 1 invalid content/check failed, 2 argument or I/O error.",
         version = env!("CARGO_PKG_VERSION")
