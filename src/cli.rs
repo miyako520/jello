@@ -1266,8 +1266,7 @@ fn rollback_failed_replacement(
             let _ = fs::remove_file(temporary_path);
             install_error
         }
-        Err(rollback_error) => io::Error::new(
-            io::ErrorKind::Other,
+        Err(rollback_error) => io::Error::other(
             format!(
                 "failed to install replacement: {install_error}; rollback failed: {rollback_error}; original remains at `{}` and replacement remains at `{}`",
                 backup_path.display(),
@@ -1385,7 +1384,7 @@ fn concurrent_modification_error() -> io::Error {
 }
 
 fn other_io_error(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, message)
+    io::Error::other(message)
 }
 
 fn create_temporary_sibling(path: &Path, suffix: &str) -> io::Result<(PathBuf, File)> {

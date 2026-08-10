@@ -13,8 +13,9 @@ pub enum SchemaState {
 }
 
 /// A thin cancellation-aware wrapper around the core [`SchemaValidator`].
-/// Compilation itself cannot be interrupted; when a result arrives for an
-/// outdated generation it is discarded by the analysis worker instead.
+/// The core checks the generation between bounded parsing, reference loading,
+/// cache validation, compilation, and issue collection steps. Results for a
+/// generation superseded inside one third-party call are discarded afterward.
 pub struct SchemaEngine {
     validator: SchemaValidator,
 }
@@ -38,11 +39,17 @@ impl SchemaEngine {
         if is_cancelled(latest_generation, generation) {
             return None;
         }
-        Some(match self.validator.validate(schema_path, instance_json) {
-            Ok(issues) if issues.is_empty() => SchemaState::Valid,
-            Ok(issues) => SchemaState::Invalid(issues),
-            Err(error) => SchemaState::LoadError(error),
-        })
+        let cancellation_generation = latest_generation.clone();
+        match self
+            .validator
+            .validate_with_cancel(schema_path, instance_json, move || {
+                is_cancelled(&cancellation_generation, generation)
+            }) {
+            Ok(Some(issues)) if issues.is_empty() => Some(SchemaState::Valid),
+            Ok(Some(issues)) => Some(SchemaState::Invalid(issues)),
+            Ok(None) => None,
+            Err(error) => Some(SchemaState::LoadError(error)),
+        }
     }
 }
 

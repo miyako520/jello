@@ -63,8 +63,7 @@ pub fn save_updated(path: &Path, expected_contents: &[u8], contents: &[u8]) -> i
 
 fn verify_file_content_matches(path: &Path, expected: &[u8]) -> io::Result<()> {
     if fs::read(path)? != expected {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             "the file changed after it was opened; reopen it before saving",
         ));
     }
@@ -299,7 +298,7 @@ fn sibling_path(path: &Path, suffix: &str, attempt: usize) -> PathBuf {
 
 #[cfg(windows)]
 fn other_io_error(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, message)
+    io::Error::other(message)
 }
 
 #[cfg(windows)]

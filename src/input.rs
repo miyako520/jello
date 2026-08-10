@@ -15,8 +15,7 @@ fn read_utf8_file_stable_with(path: &Path, between_reads: impl FnOnce()) -> io::
     between_reads();
     let second = read_bytes_limited(path, MAX_INPUT_BYTES)?;
     if first != second {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             "file changed while it was being read; try again",
         ));
     }
@@ -40,12 +39,9 @@ fn read_bytes_limited(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     let read_limit = u64::try_from(capacity)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "input limit is too large"))?;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(capacity).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "allocation failed while reading input",
-        )
-    })?;
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| io::Error::other("allocation failed while reading input"))?;
     file.take(read_limit).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(io::Error::new(

@@ -6,35 +6,22 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- Added a line-level Myers diff engine to the core crate (`diff_lines`) with
-  line-count and edit-step limits so huge inputs degrade gracefully instead of
-  exhausting memory.
-- Added `--diff` to the CLI: prints a unified diff of the fixed output instead
-  of JSON (requires `--fix`; supported by `easy`).
-- Added `--schema <path>` to the CLI: validates the output against a local
-  JSON Schema Draft 2020-12 file, exiting 1 on violations and 2 on load
-  errors. Schema support is an optional `schema` feature of the core crate,
-  enabled for released builds.
-- Moved JSON Schema validation from the desktop crate into the core crate
-  (`SchemaValidator`, feature `schema`) so the CLI shares the same engine,
-  budget limits, and path confinement as the desktop application.
-- Persisted the desktop application's language choice in the same
-  `%LOCALAPPDATA%\Jello\config` file used by `jello-drop.exe`, so both tools
-  remember the selection.
-- Invalid repair reviews now list their underlying diagnostics (for example
-  output-size errors) in the desktop Problems panel.
-- Added a Changes panel to the desktop application showing the line diff
-  between the source and the current preview, updated as repairs are accepted
-  or rejected.
-- The desktop preview pane can copy the formatted output to the clipboard with
-  a single click.
-
-## [0.2.1] - 2026-08-05
+## [0.2.1] - 2026-08-10
 
 ### Added
 
+- Added a bounded line-level Myers diff engine to the core crate, `--diff` to
+  the CLI and easy mode, and a live Changes panel to the desktop application.
+- Added `--schema <path>` to validate canonical output against local JSON
+  Schema Draft 2020-12 documents. The shared core validator confines relative
+  references to the schema directory, blocks network references, caches
+  compiled schemas, and enforces file, byte, and node budgets.
+- Persisted the desktop language choice in the same
+  `%LOCALAPPDATA%\Jello\config` file used by `jello-drop.exe`.
+- Added a desktop preview Copy button and exposed invalid repair-review
+  diagnostics in the Problems panel.
+- Added property tests, targeted boundary tests, and `cargo-fuzz` repair and
+  diff targets for arbitrary Unicode and structured JSON5 inputs.
 - Added interactive repair review to the desktop application: accept or reject
   each repair group or all groups, with pending, accepted, and rejected ranges
   highlighted in the source pane; clicking a repair focuses its ranges and
@@ -50,6 +37,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Raised the core minimum supported Rust version from 1.73 to 1.85 and pinned
+  the IDNA/ICU dependency chain to versions compatible with that toolchain.
+- Release verification now checks all core features with the declared MSRV.
 - Localized remaining desktop strings (save, accept/reject controls, invalid
   preview states) in both English and Chinese.
 - The desktop application now caches the formatted preview between frames and
@@ -57,6 +47,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Restored cooperative cancellation throughout shared Schema loading, cache
+  validation, compilation boundaries, and issue collection so superseded GUI
+  analyses are discarded promptly; bounded node counts limit work inside
+  third-party calls that cannot be interrupted directly.
 - Consecutive desktop saves no longer create `name.fixed-2.json`,
   `name.fixed-3.json` stacks; they update the session's output file in place.
 - Desktop saves are refused when the target file changed externally after it

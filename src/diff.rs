@@ -178,8 +178,16 @@ pub fn unified_diff(before: &str, after: &str, context: usize) -> Option<String>
                 DiffOp::Insert { after } => after_start = after_start.min(*after),
             }
         }
-        let before_start = before_start.min(before_lines.len().saturating_sub(1));
-        let after_start = after_start.min(after_lines.len().saturating_sub(1));
+        let before_start = if before_start == usize::MAX {
+            0
+        } else {
+            before_start + 1
+        };
+        let after_start = if after_start == usize::MAX {
+            0
+        } else {
+            after_start + 1
+        };
         let before_count = ops[start..end]
             .iter()
             .filter(|op| !matches!(op, DiffOp::Insert { .. }))
@@ -189,11 +197,7 @@ pub fn unified_diff(before: &str, after: &str, context: usize) -> Option<String>
             .filter(|op| !matches!(op, DiffOp::Delete { .. }))
             .count();
         output.push_str(&format!(
-            "@@ -{},{} +{},{} @@\n",
-            before_start + 1,
-            before_count,
-            after_start + 1,
-            after_count
+            "@@ -{before_start},{before_count} +{after_start},{after_count} @@\n",
         ));
         for op in &ops[start..end] {
             match op {
@@ -333,6 +337,12 @@ mod tests {
         assert_eq!(rendered.matches("@@ -").count(), 2);
         assert!(rendered.contains("@@ -1,2 +1,2 @@\n"));
         assert!(rendered.contains("@@ -9,2 +9,2 @@\n"));
+    }
+
+    #[test]
+    fn unified_diff_uses_zero_ranges_for_empty_sides() {
+        assert_eq!(unified_diff("", "a", 1).unwrap(), "@@ -0,0 +1,1 @@\n+ a\n");
+        assert_eq!(unified_diff("a", "", 1).unwrap(), "@@ -1,1 +0,0 @@\n- a\n");
     }
 
     #[test]

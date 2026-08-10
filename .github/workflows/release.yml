@@ -26,6 +26,10 @@ jobs:
           rustup update stable
           rustup default stable
           rustup component add rustfmt clippy
+      - name: Check with the declared MSRV (1.85)
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          cargo +1.85.0 check --locked --all-targets --all-features
       - name: Read and verify Cargo version
         id: metadata
         shell: bash

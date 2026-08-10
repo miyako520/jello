@@ -17,6 +17,10 @@ use url::Url;
 
 pub const MAX_SCHEMA_FILES: usize = 64;
 pub const MAX_SCHEMA_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_SCHEMA_NODES: usize = 100_000;
+pub const MAX_SCHEMA_INSTANCE_NODES: usize = 1_000_000;
+
+type CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaIssue {
@@ -29,6 +33,8 @@ pub struct SchemaIssue {
 struct SchemaLimits {
     max_files: usize,
     max_total_bytes: usize,
+    max_schema_nodes: usize,
+    max_instance_nodes: usize,
 }
 
 impl Default for SchemaLimits {
@@ -36,6 +42,8 @@ impl Default for SchemaLimits {
         Self {
             max_files: MAX_SCHEMA_FILES,
             max_total_bytes: MAX_SCHEMA_TOTAL_BYTES,
+            max_schema_nodes: MAX_SCHEMA_NODES,
+            max_instance_nodes: MAX_SCHEMA_INSTANCE_NODES,
         }
     }
 }
@@ -53,16 +61,33 @@ struct LoadedSchema {
     stamp: FileStamp,
 }
 
-#[derive(Debug)]
 struct LoadState {
     root: PathBuf,
     files: HashMap<PathBuf, LoadedSchema>,
     total_bytes: usize,
+    schema_nodes: usize,
     limits: SchemaLimits,
+    is_cancelled: CancelCheck,
+}
+
+impl std::fmt::Debug for LoadState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoadState")
+            .field("root", &self.root)
+            .field("files", &self.files)
+            .field("total_bytes", &self.total_bytes)
+            .field("schema_nodes", &self.schema_nodes)
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LoadState {
     fn load_path(&mut self, path: &Path) -> Result<Value, String> {
+        if (self.is_cancelled)() {
+            return Err("schema validation was cancelled".to_string());
+        }
         if let Some(loaded) = self.files.get(path) {
             return Ok(loaded.value.clone());
         }
@@ -85,9 +110,25 @@ impl LoadState {
                 self.limits.max_total_bytes
             ));
         }
+        if (self.is_cancelled)() {
+            return Err("schema validation was cancelled".to_string());
+        }
 
         let value: Value = serde_json::from_str(&source)
             .map_err(|error| format!("schema {} is not valid JSON: {error}", path.display()))?;
+        let remaining_nodes = self
+            .limits
+            .max_schema_nodes
+            .saturating_sub(self.schema_nodes);
+        let node_count = value_node_count_up_to(&value, remaining_nodes).ok_or_else(|| {
+            format!(
+                "schema node limit exceeded (maximum {})",
+                self.limits.max_schema_nodes
+            )
+        })?;
+        if (self.is_cancelled)() {
+            return Err("schema validation was cancelled".to_string());
+        }
         let stamp = FileStamp {
             path: path.to_path_buf(),
             bytes: source.len(),
@@ -101,6 +142,7 @@ impl LoadState {
                 stamp,
             },
         );
+        self.schema_nodes += node_count;
         Ok(value)
     }
 
@@ -173,27 +215,74 @@ impl SchemaValidator {
         schema_path: &Path,
         instance_json: &str,
     ) -> Result<Vec<SchemaIssue>, String> {
-        self.validate_inner(schema_path, instance_json)
+        self.validate_with_cancel(schema_path, instance_json, || false)?
+            .ok_or_else(|| "schema validation was unexpectedly cancelled".to_string())
+    }
+
+    /// Validate while periodically consulting `is_cancelled`.
+    ///
+    /// Returns `Ok(None)` when cancellation is observed. The callback is
+    /// checked between file reads, cache validation, compilation, and issue
+    /// collection so callers can discard superseded work without reporting a
+    /// schema error.
+    pub fn validate_with_cancel<F>(
+        &mut self,
+        schema_path: &Path,
+        instance_json: &str,
+        is_cancelled: F,
+    ) -> Result<Option<Vec<SchemaIssue>>, String>
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        let is_cancelled: CancelCheck = Arc::new(is_cancelled);
+        if is_cancelled() {
+            return Ok(None);
+        }
+        match self.validate_inner(schema_path, instance_json, &is_cancelled) {
+            Ok(_) if is_cancelled() => Ok(None),
+            Ok(issues) => Ok(Some(issues)),
+            Err(_) if is_cancelled() => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn validate_inner(
         &mut self,
         schema_path: &Path,
         instance_json: &str,
+        is_cancelled: &CancelCheck,
     ) -> Result<Vec<SchemaIssue>, String> {
         let canonical_schema = fs::canonicalize(schema_path)
             .map_err(|error| format!("unable to open schema {}: {error}", schema_path.display()))?;
+        if is_cancelled() {
+            return Err("schema validation was cancelled".to_string());
+        }
         let instance: Value = serde_json::from_str(instance_json)
             .map_err(|error| format!("formatted preview is not strict JSON: {error}"))?;
+        if value_node_count_up_to(&instance, self.limits.max_instance_nodes).is_none() {
+            return Err(format!(
+                "schema instance node limit exceeded (maximum {})",
+                self.limits.max_instance_nodes
+            ));
+        }
+        if is_cancelled() {
+            return Err("schema validation was cancelled".to_string());
+        }
 
         let cache_is_current = self.cached.as_ref().is_some_and(|cached| {
             cached.canonical_path == canonical_schema
-                && dependencies_are_current(&cached.dependencies)
+                && dependencies_are_current(&cached.dependencies, is_cancelled)
         });
+        if is_cancelled() {
+            return Err("schema validation was cancelled".to_string());
+        }
         if !cache_is_current {
             self.cached = None;
-            let cached = self.compile(canonical_schema.clone())?;
+            let cached = self.compile(canonical_schema.clone(), is_cancelled.clone())?;
             self.cached = Some(cached);
+        }
+        if is_cancelled() {
+            return Err("schema validation was cancelled".to_string());
         }
 
         let validator = &self.cached.as_ref().expect("cache was populated").validator;
@@ -205,6 +294,9 @@ impl SchemaValidator {
             .iter_errors(&instance)
             .take(crate::lexer::MAX_DIAGNOSTICS)
         {
+            if is_cancelled() {
+                return Err("schema validation was cancelled".to_string());
+            }
             issues.push(SchemaIssue {
                 message: error.to_string(),
                 instance_path: error.instance_path().as_str().to_string(),
@@ -214,7 +306,11 @@ impl SchemaValidator {
         Ok(issues)
     }
 
-    fn compile(&self, canonical_schema: PathBuf) -> Result<CachedSchema, String> {
+    fn compile(
+        &self,
+        canonical_schema: PathBuf,
+        is_cancelled: CancelCheck,
+    ) -> Result<CachedSchema, String> {
         let root = canonical_schema
             .parent()
             .ok_or_else(|| "schema path has no parent directory".to_string())?
@@ -223,7 +319,9 @@ impl SchemaValidator {
             root,
             files: HashMap::new(),
             total_bytes: 0,
+            schema_nodes: 0,
             limits: self.limits,
+            is_cancelled: is_cancelled.clone(),
         }));
         let schema = state
             .lock()
@@ -244,6 +342,9 @@ impl SchemaValidator {
             })
             .build(&schema)
             .map_err(|error| format!("unable to compile schema: {error}"))?;
+        if is_cancelled() {
+            return Err("schema validation was cancelled".to_string());
+        }
         let dependencies = state
             .lock()
             .map_err(|_| "schema loader state is unavailable".to_string())?
@@ -256,8 +357,11 @@ impl SchemaValidator {
     }
 }
 
-fn dependencies_are_current(dependencies: &[FileStamp]) -> bool {
+fn dependencies_are_current(dependencies: &[FileStamp], is_cancelled: &CancelCheck) -> bool {
     dependencies.iter().all(|stamp| {
+        if is_cancelled() {
+            return false;
+        }
         let Ok(canonical) = fs::canonicalize(&stamp.path) else {
             return false;
         };
@@ -271,6 +375,23 @@ fn dependencies_are_current(dependencies: &[FileStamp]) -> bool {
     })
 }
 
+fn value_node_count_up_to(value: &Value, limit: usize) -> Option<usize> {
+    fn visit(value: &Value, count: &mut usize, limit: usize) -> bool {
+        if *count >= limit {
+            return false;
+        }
+        *count += 1;
+        match value {
+            Value::Array(values) => values.iter().all(|value| visit(value, count, limit)),
+            Value::Object(values) => values.values().all(|value| visit(value, count, limit)),
+            _ => true,
+        }
+    }
+
+    let mut count = 0;
+    visit(value, &mut count, limit).then_some(count)
+}
+
 fn fingerprint(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -279,6 +400,8 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -428,6 +551,7 @@ mod tests {
             limits: SchemaLimits {
                 max_files: 1,
                 max_total_bytes: 1024,
+                ..SchemaLimits::default()
             },
         };
 
@@ -445,10 +569,69 @@ mod tests {
             limits: SchemaLimits {
                 max_files: 2,
                 max_total_bytes: 4,
+                ..SchemaLimits::default()
             },
         };
 
         let error = validator.validate(&root, r#""value""#).unwrap_err();
         assert!(error.contains("total byte limit"), "{error}");
+    }
+
+    #[test]
+    fn cancellable_validation_stops_after_work_has_started() {
+        let directory = TestDirectory::new("cancelled-after-start");
+        let schema = directory.path().join("schema.json");
+        fs::write(&schema, r#"{"type":"string"}"#).unwrap();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let cancellation_checks = checks.clone();
+
+        let result = SchemaValidator::new()
+            .validate_with_cancel(&schema, r#""value""#, move || {
+                cancellation_checks.fetch_add(1, Ordering::AcqRel) > 0
+            })
+            .unwrap();
+
+        assert!(result.is_none());
+        assert!(checks.load(Ordering::Acquire) >= 2);
+    }
+
+    #[test]
+    fn instance_node_budget_is_enforced_before_validation() {
+        let directory = TestDirectory::new("instance-nodes");
+        let schema = directory.path().join("schema.json");
+        fs::write(&schema, "{}").unwrap();
+        let mut validator = SchemaValidator {
+            cached: None,
+            limits: SchemaLimits {
+                max_files: 1,
+                max_total_bytes: 1024,
+                max_schema_nodes: 1024,
+                max_instance_nodes: 2,
+            },
+        };
+
+        let error = validator.validate(&schema, "[1, 2]").unwrap_err();
+
+        assert!(error.contains("instance node limit"), "{error}");
+    }
+
+    #[test]
+    fn aggregate_schema_node_budget_is_enforced_before_compilation() {
+        let directory = TestDirectory::new("schema-nodes");
+        let schema = directory.path().join("schema.json");
+        fs::write(&schema, r#"{"allOf":[{},{}]}"#).unwrap();
+        let mut validator = SchemaValidator {
+            cached: None,
+            limits: SchemaLimits {
+                max_files: 1,
+                max_total_bytes: 1024,
+                max_schema_nodes: 3,
+                max_instance_nodes: 1024,
+            },
+        };
+
+        let error = validator.validate(&schema, "null").unwrap_err();
+
+        assert!(error.contains("schema node limit"), "{error}");
     }
 }

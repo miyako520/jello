@@ -34,7 +34,10 @@ pub use repair_plan::{
     RepairSelection,
 };
 #[cfg(feature = "schema")]
-pub use schema::{SchemaIssue, SchemaValidator, MAX_SCHEMA_FILES, MAX_SCHEMA_TOTAL_BYTES};
+pub use schema::{
+    SchemaIssue, SchemaValidator, MAX_SCHEMA_FILES, MAX_SCHEMA_INSTANCE_NODES, MAX_SCHEMA_NODES,
+    MAX_SCHEMA_TOTAL_BYTES,
+};
 pub use span::{Position, Span};
 pub use stats::Stats;
 

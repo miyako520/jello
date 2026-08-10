@@ -8,7 +8,7 @@ Older unpublished revisions used the working name `jqr`.
 
 ## Installation
 
-Install the latest source revision with Rust 1.73 or newer:
+Install the latest source revision with Rust 1.85 or newer:
 
 ```powershell
 cargo install --git https://github.com/miyako520/jello --locked --features schema
@@ -47,8 +47,14 @@ the editors.
 new path you choose. Neither action overwrites an existing file. The toolbar
 can load a local JSON Schema Draft 2020-12 document; relative references are
 limited to files inside that schema's directory and network references are
-blocked. English is the default interface language, with Chinese available
-from the language selector.
+blocked. The language selector switches between English and Chinese; the
+choice is remembered in `%LOCALAPPDATA%\Jello\config`, the same file used by
+`jello-drop.exe`.
+
+The collapsible panel has four tabs: problems, repairs, schema, and changes.
+The changes tab shows a live line diff between the source and the current
+preview, updating as repairs are accepted or rejected. The preview header's
+`Copy` button copies the formatted output to the clipboard.
 
 ### Windows drag and drop
 
@@ -244,7 +250,23 @@ cargo test --manifest-path crates/jello-gui/Cargo.toml --all-targets --locked
 cargo build --manifest-path crates/jello-gui/Cargo.toml --release --locked
 ```
 
-CI runs the core checks on Linux, macOS, Windows, and Rust 1.73. Building the
+Property tests in `tests/properties.rs` run arbitrary Unicode and structured
+JSON5 inputs through the parser, repair, plan, and diff APIs, and verify that
+repair plans match the legacy repair path and that diffs round-trip. The
+targeted limit tests in `tests/boundaries.rs` cover the nesting, token, and
+multi-byte edit boundaries that random inputs rarely reach.
+
+The `fuzz/` directory contains `cargo-fuzz` targets for the repair and diff
+paths. They need a nightly toolchain and are not part of the normal test
+suite:
+
+```powershell
+cargo install cargo-fuzz
+cargo fuzz run repair -- -max_total_time=300
+cargo fuzz run diff -- -max_total_time=300
+```
+
+CI runs the core checks on Linux, macOS, Windows, and Rust 1.85. Building the
 desktop application from source requires Rust 1.92 because its `eframe` 0.35
 dependency requires that toolchain; CI checks that minimum separately and
 release-builds the GUI on Windows. Users of `jello-gui.exe` do not need Rust

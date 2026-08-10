@@ -80,10 +80,7 @@ fn read_source<R: Read>(mut reader: R) -> Result<String, DropFileError> {
             )]));
         }
         bytes.try_reserve(read).map_err(|_| {
-            DropFileError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                "allocation failed while reading input",
-            ))
+            DropFileError::Io(io::Error::other("allocation failed while reading input"))
         })?;
         bytes.extend_from_slice(&buffer[..read]);
     }
