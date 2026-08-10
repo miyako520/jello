@@ -1,0 +1,102 @@
+src/schema.rs
+  s_d00eb2b6d40d10::t_0769dc8e87a5e6 403-404,581-595
+  s_d00eb2b6d40d10::t_3e30d0c70725b2 73-79,81-83,242
+  s_d00eb2b6d40d10::t_c34939b9981c21 580,596-636
+  s_d00eb2b6d40d10::t_6001f43b11986e 20-21,36-37,45-46,68,80,119-128,145,262-267,322,378-385,387-394,554,572
+  s_d00eb2b6d40d10::t_793f3c344e6442 22,71-72,90,360,386,579
+  s_d00eb2b6d40d10::t_28d94999d5b1a1 23,70,88-89,113-115,129-131,218-241,243-246,253,257-259,268-270,274,276-278,281,284-286,297-299,309-313,324,345-347,362-364
+CHANGELOG.md
+  s_d00eb2b6d40d10::t_f0a419546869dd 9,13-20
+  s_d00eb2b6d40d10::t_c01db68c37cf35 21-24,40-42,50-53
+Cargo.toml
+  s_7bdabdd0475189::t_cb21dcedfd4f77 5
+  s_d00eb2b6d40d10::t_e16cad649aa592 13,28-30
+src/drop_mode.rs
+  s_d00eb2b6d40d10::t_c7412b9149798f 83
+fuzz/corpus/repair/json5.json
+  s_7bdabdd0475189::t_cb21dcedfd4f77 1
+tests/properties.rs
+  s_7bdabdd0475189::t_dec27f764af4f2 1-4,7-45,118-125,129
+  s_7bdabdd0475189::t_a16a6ff41356a2 74-83,105-115
+  s_7bdabdd0475189::t_cb21dcedfd4f77 5-6,46-50,52-73,84-96,126-128,131-132
+  s_7bdabdd0475189::t_cbe6a83c4f23ab 51
+  s_7bdabdd0475189::t_d3f60f423432f6 97-104,116-117,130
+fuzz/corpus/repair/broken.json
+  s_7bdabdd0475189::t_cb21dcedfd4f77 1
+fuzz/Cargo.toml
+  s_7bdabdd0475189::t_cb21dcedfd4f77 1-9,12-28
+  s_7bdabdd0475189::t_b76dcd34379c74 10-11
+src/diff.rs
+  s_fb06bc88bb5250::t_fa5b641db66c0f 181-190,200,342-347
+crates/jello-gui/src/schema_engine.rs
+  s_d00eb2b6d40d10::t_be9efd81efa833 51
+  s_d00eb2b6d40d10::t_ce29c085e79478 16-18,42,48-50
+  s_d00eb2b6d40d10::t_793f3c344e6442 43-47
+  s_d00eb2b6d40d10::t_3cff060f72a0e2 52
+fuzz/README.md
+  s_7bdabdd0475189::t_b76dcd34379c74 1-17
+.gitignore
+  s_7bdabdd0475189::t_cfb25e9a538748 4
+  s_7bdabdd0475189::t_a16a6ff41356a2 2-3
+fuzz/corpus/repair/valid.json
+  s_7bdabdd0475189::t_cb21dcedfd4f77 1
+fuzz/fuzz_targets/repair.rs
+  s_7bdabdd0475189::t_cb21dcedfd4f77 1-20
+fuzz/fuzz_targets/diff.rs
+  s_7bdabdd0475189::t_d3f60f423432f6 10,12-13
+  s_7bdabdd0475189::t_ff649281f50aa2 15
+  s_7bdabdd0475189::t_cb21dcedfd4f77 1-9,11,14,16
+fuzz/corpus/diff/sample.txt
+  s_7bdabdd0475189::t_cb21dcedfd4f77 1-3
+README.md
+  s_fb06bc88bb5250::t_6c69a94a60f520 11
+  s_d00eb2b6d40d10::t_271ae9d8619141 50-57,253-269
+tests/boundaries.rs
+  s_7bdabdd0475189::t_dec27f764af4f2 1-41
+src/input.rs
+  s_d00eb2b6d40d10::t_c7412b9149798f 18,42-44
+.github/workflows/ci.yml
+  s_d00eb2b6d40d10::t_e60c6a4fa3706b 42,47,49
+.github/workflows/release.yml
+  s_d00eb2b6d40d10::t_aefe08dd9459f6 29-32
+Cargo.lock
+  s_d00eb2b6d40d10::t_6ef1e864158ad8 3,117-126,138-143,155-160,219,221,232,234,245,247,259,261,265,267,279,281,285,287,311,313,330,409-414,570-578,588-612,628-665,741-753,760-771,887-899,910-915,968-976,1037-1045
+src/cli.rs
+  s_d00eb2b6d40d10::t_d4014fa246ad27 1269,1387
+src/lib.rs
+  s_d00eb2b6d40d10::t_737ef5c0fe8519 37-40
+src/output.rs
+  s_d00eb2b6d40d10::t_2ca20e3f588494 66,301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ea5e2ccf493ceb8058c765781e17fc6fd7df1ad8",
+  "prompts": {},
+  "sessions": {
+    "s_7bdabdd0475189": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_02f441336ffeSi62BC6TIVkpeP",
+        "model": "deepseek-v4-flash-free"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    },
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    },
+    "s_fb06bc88bb5250": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_030503fa1ffeGHZFNSx2XPVaK2",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
