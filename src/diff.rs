@@ -20,15 +20,28 @@ pub enum DiffOp {
     Insert { after: usize },
 }
 
+fn collect_bounded<I>(items: I, limit: usize) -> Option<Vec<I::Item>>
+where
+    I: IntoIterator,
+{
+    let capacity = limit.checked_add(1)?;
+    let mut collected = Vec::new();
+    collected.try_reserve_exact(capacity).ok()?;
+    for item in items.into_iter().take(capacity) {
+        if collected.len() == limit {
+            return None;
+        }
+        collected.push(item);
+    }
+    Some(collected)
+}
+
 /// Compute a line-level diff, or `None` when the inputs are too large to diff
 /// cheaply. Lines are normalized via [`str::lines`], so CRLF and LF inputs
 /// compare equal.
 pub fn diff_lines(before: &str, after: &str) -> Option<Vec<DiffOp>> {
-    let before: Vec<&str> = before.lines().collect();
-    let after: Vec<&str> = after.lines().collect();
-    if before.len() > MAX_DIFF_LINES || after.len() > MAX_DIFF_LINES {
-        return None;
-    }
+    let before = collect_bounded(before.lines(), MAX_DIFF_LINES)?;
+    let after = collect_bounded(after.lines(), MAX_DIFF_LINES)?;
     myers(&before, &after)
 }
 
@@ -231,6 +244,18 @@ pub fn unified_diff(before: &str, after: &str, context: usize) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_collection_stops_after_the_first_excess_item() {
+        let values = (0..).inspect(|&index| {
+            assert!(
+                index <= 3,
+                "the iterator was consumed beyond the first excess item"
+            );
+        });
+
+        assert!(collect_bounded(values, 3).is_none());
+    }
 
     #[test]
     fn equal_inputs_produce_only_equal_rows() {

@@ -328,6 +328,7 @@ version = "0.2.2"
 dependencies = [
  "jsonschema",
  "proptest",
+ "serde",
  "serde_json",
  "url",
 ]

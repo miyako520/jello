@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use jsonschema::{Retrieve, Uri, Validator};
+use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
@@ -114,8 +115,11 @@ impl LoadState {
             return Err("schema validation was cancelled".to_string());
         }
 
-        let value: Value = serde_json::from_str(&source)
-            .map_err(|error| format!("schema {} is not valid JSON: {error}", path.display()))?;
+        let value = parse_bounded_json(
+            &source,
+            &format!("schema {} is not valid JSON", path.display()),
+            crate::parser::parse,
+        )?;
         let remaining_nodes = self
             .limits
             .max_schema_nodes
@@ -257,8 +261,11 @@ impl SchemaValidator {
         if is_cancelled() {
             return Err("schema validation was cancelled".to_string());
         }
-        let instance: Value = serde_json::from_str(instance_json)
-            .map_err(|error| format!("formatted preview is not strict JSON: {error}"))?;
+        let instance = parse_bounded_json(
+            instance_json,
+            "formatted preview is not strict JSON",
+            crate::parser::parse_strict_repair_output,
+        )?;
         if value_node_count_up_to(&instance, self.limits.max_instance_nodes).is_none() {
             return Err(format!(
                 "schema instance node limit exceeded (maximum {})",
@@ -373,6 +380,29 @@ fn dependencies_are_current(dependencies: &[FileStamp], is_cancelled: &CancelChe
         };
         source.len() == stamp.bytes && fingerprint(source.as_bytes()) == stamp.fingerprint
     })
+}
+
+fn parse_bounded_json<F>(source: &str, context: &str, validate: F) -> Result<Value, String>
+where
+    F: FnOnce(&str) -> Result<crate::ast::Value, Vec<crate::Diagnostic>>,
+{
+    let parsed = validate(source).map_err(|diagnostics| {
+        let detail = diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.message(crate::Language::En))
+            .unwrap_or_else(|| "invalid JSON".to_string());
+        format!("{context}: {detail}")
+    })?;
+    drop(parsed);
+
+    let mut deserializer = serde_json::Deserializer::from_str(source);
+    deserializer.disable_recursion_limit();
+    let value =
+        Value::deserialize(&mut deserializer).map_err(|error| format!("{context}: {error}"))?;
+    deserializer
+        .end()
+        .map_err(|error| format!("{context}: {error}"))?;
+    Ok(value)
 }
 
 fn value_node_count_up_to(value: &Value, limit: usize) -> Option<usize> {
@@ -613,6 +643,34 @@ mod tests {
         let error = validator.validate(&schema, "[1, 2]").unwrap_err();
 
         assert!(error.contains("instance node limit"), "{error}");
+    }
+
+    #[test]
+    fn schema_validation_accepts_the_core_nesting_limit() {
+        let directory = TestDirectory::new("core-depth");
+        let schema = directory.path().join("schema.json");
+        fs::write(&schema, "{}").unwrap();
+        let depth = crate::MAX_NESTING_DEPTH;
+        let instance = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+        crate::parse(&instance).expect("the core parser accepts its documented depth limit");
+
+        let issues = SchemaValidator::new().validate(&schema, &instance).unwrap();
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn schema_validation_accepts_formatted_output_above_the_input_byte_limit() {
+        let directory = TestDirectory::new("formatted-output-size");
+        let schema = directory.path().join("schema.json");
+        fs::write(&schema, "{}").unwrap();
+        let instance = format!("\"{}\"", "a".repeat(crate::MAX_INPUT_BYTES));
+        assert!(instance.len() > crate::MAX_INPUT_BYTES);
+        assert!(instance.len() <= crate::MAX_OUTPUT_BYTES);
+
+        let issues = SchemaValidator::new().validate(&schema, &instance).unwrap();
+
+        assert!(issues.is_empty());
     }
 
     #[test]

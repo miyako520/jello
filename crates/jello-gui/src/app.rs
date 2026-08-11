@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,8 @@ use crate::i18n::{Message, UiLanguage, text};
 use crate::model::AppModel;
 use crate::schema_engine::SchemaState;
 use crate::worker::AnalysisWorker;
+
+const MAX_LINE_NUMBER_ROWS: usize = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueTab {
@@ -465,7 +468,7 @@ impl JelloApp {
             .as_ref()
             .map(source_overlays)
             .unwrap_or_default();
-        let desired_rows = self.model.source.lines().count().max(24);
+        let desired_rows = bounded_desired_rows(&self.model.source);
         let source = &mut self.model.source;
         let tokens = &mut self.source_tokens;
         ScrollArea::both()
@@ -542,7 +545,7 @@ impl JelloApp {
             return;
         }
         let preview = &mut self.preview_text;
-        let desired_rows = preview.lines().count().max(24);
+        let desired_rows = bounded_desired_rows(preview);
         ScrollArea::both()
             .id_salt("preview-scroll")
             .auto_shrink([false, false])
@@ -973,17 +976,43 @@ fn pane_header(ui: &mut egui::Ui, title: &str, detail: Option<&str>) {
 }
 
 fn line_numbers(ui: &mut egui::Ui, source: &str) {
-    let count = source.lines().count().max(1);
-    let width = count.to_string().len();
-    let mut numbers = String::new();
-    for line in 1..=count {
-        numbers.push_str(&format!("{line:>width$}\n"));
-    }
+    let Some(numbers) = line_number_text(source) else {
+        ui.label(
+            RichText::new("…")
+                .monospace()
+                .color(ui.visuals().weak_text_color()),
+        );
+        return;
+    };
     ui.label(
         RichText::new(numbers)
             .monospace()
             .color(ui.visuals().weak_text_color()),
     );
+}
+
+fn bounded_line_count(source: &str) -> Option<usize> {
+    let count = source.lines().take(MAX_LINE_NUMBER_ROWS + 1).count().max(1);
+    (count <= MAX_LINE_NUMBER_ROWS).then_some(count)
+}
+
+fn bounded_desired_rows(source: &str) -> usize {
+    bounded_line_count(source)
+        .unwrap_or(MAX_LINE_NUMBER_ROWS)
+        .max(24)
+}
+
+fn line_number_text(source: &str) -> Option<String> {
+    let count = bounded_line_count(source)?;
+    let width = count.to_string().len();
+    let mut numbers = String::new();
+    numbers
+        .try_reserve_exact(count.checked_mul(width.checked_add(1)?)?)
+        .ok()?;
+    for line in 1..=count {
+        writeln!(numbers, "{line:>width$}").ok()?;
+    }
+    Some(numbers)
 }
 
 fn evaluation_candidate(evaluation: &RepairEvaluation) -> Option<&RepairCandidate> {
@@ -1109,7 +1138,27 @@ mod tests {
     use crate::highlight::OverlayState;
     use crate::review::ReviewState;
 
-    use super::{byte_to_char_index, candidate_overlays, select_dropped_path, source_overlays};
+    use super::{
+        MAX_LINE_NUMBER_ROWS, bounded_desired_rows, byte_to_char_index, candidate_overlays,
+        line_number_text, select_dropped_path, source_overlays,
+    };
+
+    #[test]
+    fn excessive_line_counts_degrade_without_building_a_line_number_gutter() {
+        let source = "\n".repeat(MAX_LINE_NUMBER_ROWS + 1);
+
+        assert_eq!(bounded_desired_rows(&source), MAX_LINE_NUMBER_ROWS);
+        assert!(line_number_text(&source).is_none());
+    }
+
+    #[test]
+    fn ordinary_line_counts_keep_numbered_rows() {
+        assert_eq!(bounded_desired_rows("first\nsecond\nthird"), 24);
+        assert_eq!(
+            line_number_text("first\nsecond\nthird").as_deref(),
+            Some("1\n2\n3\n")
+        );
+    }
 
     #[test]
     fn review_overlay_builders_use_group_changes_and_candidate_highlights() {
