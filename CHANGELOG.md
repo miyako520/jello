@@ -6,6 +6,19 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-11
+
+### Fixed
+
+- Bounded line collection before unified-diff limits are evaluated, preventing
+  highly fragmented inputs from allocating an unbounded line-index vector.
+- Capped desktop line-number gutter construction at 20,000 rows and degraded
+  larger documents to a compact marker instead of constructing a giant gutter
+  on every frame.
+- Aligned Schema validation with the core parser's 256-level nesting limit
+  while preserving validation of canonical output up to the 64 MiB output
+  limit.
+
 ## [0.2.2] - 2026-08-11
 
 ### Changed
@@ -201,7 +214,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Escaped untrusted terminal control characters in diagnostic messages, source
   labels, and source snippets while preserving accurate caret positions.
 
-[Unreleased]: https://github.com/miyako520/jello/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/miyako520/jello/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/miyako520/jello/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/miyako520/jello/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/miyako520/jello/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/miyako520/jello/compare/v0.1.2...v0.2.0
