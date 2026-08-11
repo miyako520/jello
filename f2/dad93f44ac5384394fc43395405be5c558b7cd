@@ -1,0 +1,41 @@
+src/diff.rs
+  s_d00eb2b6d40d10::t_0dac83704f811c 249,251-259
+  s_d00eb2b6d40d10::t_e1d629395b87b7 250
+  s_d00eb2b6d40d10::t_2ce84e7a25f732 23-38,43-44
+  s_d00eb2b6d40d10::t_0f339ac64d5e60 248
+crates/jello-gui/src/app.rs
+  s_d00eb2b6d40d10::t_3dc08a28d1c875 2,17,471,548,979-986,994,996-1012,1014-1015
+  s_d00eb2b6d40d10::t_7caab47fd55de9 1141-1156
+  s_d00eb2b6d40d10::t_a7ff3537dc477c 1013
+  s_d00eb2b6d40d10::t_d665b218efd647 18,995,1016-1017,1157-1161
+src/schema.rs
+  s_d00eb2b6d40d10::t_c8b5a8ba9835b6 121
+  s_d00eb2b6d40d10::t_a4862ed996907a 15,118-120,122,390-399,402-405
+  s_d00eb2b6d40d10::t_6e78384d504b99 649-652,654,670-675
+  s_d00eb2b6d40d10::t_fa8e034f58e29a 648,653,655-669
+  s_d00eb2b6d40d10::t_067a6e297bf0d3 264-268,385-389
+  s_d00eb2b6d40d10::t_d665b218efd647 400-401
+  s_d00eb2b6d40d10::t_ec6363b804dbfe 406-407
+Cargo.lock
+  s_d00eb2b6d40d10::t_f5b7f692707480 331
+Cargo.toml
+  s_d00eb2b6d40d10::t_b3db8aaa03edd9 21,25-26
+crates/jello-gui/Cargo.lock
+  s_d00eb2b6d40d10::t_98a253b8bf076e 1508
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f2dad93f44ac5384394fc43395405be5c558b7cd",
+  "prompts": {},
+  "sessions": {
+    "s_d00eb2b6d40d10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa68c-8dfe-7110-a095-3b675725b6c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zifan.yang <zifan.yang@ly.com>"
+    }
+  }
+}
