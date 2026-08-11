@@ -472,3 +472,14 @@ fn schema_mode_reports_an_unavailable_build() {
         .unwrap()
         .contains("without the schema feature"));
 }
+
+#[cfg(not(feature = "schema"))]
+#[test]
+fn chinese_language_localizes_an_unavailable_schema_build() {
+    let output = run(&["--lang", "zh", "--schema", "x.json"], Some("{}"));
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("未启用 schema 功能"), "{stderr}");
+    assert!(!stderr.contains("compiled without"), "{stderr}");
+}

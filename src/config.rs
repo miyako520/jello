@@ -45,8 +45,7 @@ pub fn save_language_config(path: &Path, language: Language) -> io::Result<()> {
     })();
     drop(temporary);
     if let Err(error) = write_result {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(error);
+        return Err(remove_config_temporary(&temporary_path, error));
     }
 
     match fs::rename(&temporary_path, path) {
@@ -60,19 +59,58 @@ pub fn save_language_config(path: &Path, language: Language) -> io::Result<()> {
             fs::rename(path, &backup_path)?;
             match fs::rename(&temporary_path, path) {
                 Ok(()) => {
-                    let _ = fs::remove_file(backup_path);
-                    Ok(())
+                    fs::remove_file(&backup_path).map_err(|cleanup_error| {
+                        io::Error::new(
+                            cleanup_error.kind(),
+                            format!(
+                                "language setting was saved, but its backup `{}` could not be removed: {cleanup_error}",
+                                backup_path.display()
+                            ),
+                        )
+                    })
                 }
-                Err(error) => {
-                    let _ = fs::rename(&backup_path, path);
-                    Err(error)
-                }
+                Err(error) => Err(rollback_config_replacement(
+                    path,
+                    &backup_path,
+                    &temporary_path,
+                    error,
+                )),
             }
         }
-        Err(error) => {
-            let _ = fs::remove_file(temporary_path);
-            Err(error)
-        }
+        Err(error) => Err(remove_config_temporary(&temporary_path, error)),
+    }
+}
+
+fn remove_config_temporary(path: &Path, primary_error: io::Error) -> io::Error {
+    match fs::remove_file(path) {
+        Ok(()) => primary_error,
+        Err(cleanup_error) if cleanup_error.kind() == io::ErrorKind::NotFound => primary_error,
+        Err(cleanup_error) => io::Error::new(
+            primary_error.kind(),
+            format!(
+                "{primary_error}; temporary language config `{}` could not be removed: {cleanup_error}",
+                path.display()
+            ),
+        ),
+    }
+}
+
+fn rollback_config_replacement(
+    path: &Path,
+    backup_path: &Path,
+    temporary_path: &Path,
+    install_error: io::Error,
+) -> io::Error {
+    match fs::rename(backup_path, path) {
+        Ok(()) => remove_config_temporary(temporary_path, install_error),
+        Err(rollback_error) => io::Error::new(
+            install_error.kind(),
+            format!(
+                "failed to install language config: {install_error}; rollback failed: {rollback_error}; the original remains at `{}` and the replacement remains at `{}`",
+                backup_path.display(),
+                temporary_path.display()
+            ),
+        ),
     }
 }
 
@@ -164,6 +202,39 @@ mod tests {
         save_language_config(&path, Language::En).unwrap();
 
         assert_eq!(load_language_config(&path).unwrap(), Some(Language::En));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rollback_failure_reports_preserved_config_paths() {
+        let directory = temporary_directory("rollback-failure");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config");
+        let backup_path = directory.join("config.backup");
+        let temporary_path = directory.join("config.temporary");
+        fs::create_dir(&path).unwrap();
+        fs::write(&backup_path, "language=en\n").unwrap();
+        fs::write(&temporary_path, "language=zh\n").unwrap();
+
+        let error = rollback_config_replacement(
+            &path,
+            &backup_path,
+            &temporary_path,
+            io::Error::other("install failed"),
+        );
+        let message = error.to_string();
+
+        assert!(message.contains("rollback failed"), "{message}");
+        assert!(
+            message.contains(&backup_path.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&temporary_path.display().to_string()),
+            "{message}"
+        );
+        assert!(backup_path.exists());
+        assert!(temporary_path.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 }

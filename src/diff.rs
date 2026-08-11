@@ -179,12 +179,18 @@ pub fn unified_diff(before: &str, after: &str, context: usize) -> Option<String>
             }
         }
         let before_start = if before_start == usize::MAX {
-            0
+            ops[..start]
+                .iter()
+                .filter(|op| !matches!(op, DiffOp::Insert { .. }))
+                .count()
         } else {
             before_start + 1
         };
         let after_start = if after_start == usize::MAX {
-            0
+            ops[..start]
+                .iter()
+                .filter(|op| !matches!(op, DiffOp::Delete { .. }))
+                .count()
         } else {
             after_start + 1
         };
@@ -343,6 +349,22 @@ mod tests {
     fn unified_diff_uses_zero_ranges_for_empty_sides() {
         assert_eq!(unified_diff("", "a", 1).unwrap(), "@@ -0,0 +1,1 @@\n+ a\n");
         assert_eq!(unified_diff("a", "", 1).unwrap(), "@@ -1,1 +0,0 @@\n- a\n");
+    }
+
+    #[test]
+    fn zero_context_insertion_uses_the_preceding_before_line() {
+        assert_eq!(
+            unified_diff("a\nb", "a\nx\nb", 0).unwrap(),
+            "@@ -1,0 +2,1 @@\n+ x\n"
+        );
+    }
+
+    #[test]
+    fn zero_context_deletion_uses_the_preceding_after_line() {
+        assert_eq!(
+            unified_diff("a\nx\nb", "a\nb", 0).unwrap(),
+            "@@ -2,1 +1,0 @@\n- x\n"
+        );
     }
 
     #[test]

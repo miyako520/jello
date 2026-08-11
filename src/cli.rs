@@ -315,13 +315,12 @@ fn run_with_io(
             }
             #[cfg(not(feature = "schema"))]
             SchemaCheck::Unavailable => {
-                let diagnostic = Diagnostic::new(
-                    "E023",
-                    DiagnosticKind::Io(
-                        "this build of jello was compiled without the schema feature".to_string(),
-                    ),
-                    None,
-                );
+                let message = match options.lang {
+                    Language::En => "this build of jello was compiled without the schema feature",
+                    Language::Zh => "此版本的 jello 编译时未启用 schema 功能",
+                };
+                let diagnostic =
+                    Diagnostic::new("E023", DiagnosticKind::Io(message.to_string()), None);
                 let rendered =
                     render_diagnostic(&diagnostic, "", &source_label, options.lang, use_color);
                 stderr.write_all(rendered.as_bytes()).map_err(|_| 2)?;

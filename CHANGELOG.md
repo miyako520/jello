@@ -6,6 +6,31 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-11
+
+### Changed
+
+- Bounded desktop syntax-highlighting spans and degraded oversized or highly
+  fragmented text to plain rendering instead of allowing preview allocations
+  to grow with every input character.
+- Replaced the desktop analysis worker's unbounded request queue with a
+  latest-request slot, so superseded source and Schema work cannot accumulate
+  in memory.
+- Sized stable file-read buffers from the actual file length instead of
+  reserving the full 16 MiB input limit for every read.
+- Clarified that checked output replacement protects against ordinary
+  concurrent edits but is not a portable atomic compare-and-swap operation.
+
+### Fixed
+
+- Corrected zero-context unified-diff headers for pure insertions and deletions
+  in the middle of a document.
+- Cleaned prepared update files when the final concurrent-change check rejects
+  a save.
+- Preserved and reported language-config backup and temporary paths when both
+  installation and rollback fail, and surfaced cleanup failures explicitly.
+- Localized the unavailable-Schema-build diagnostic when `--lang zh` is used.
+
 ## [0.2.1] - 2026-08-10
 
 ### Added
@@ -176,7 +201,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Escaped untrusted terminal control characters in diagnostic messages, source
   labels, and source snippets while preserving accurate caret positions.
 
-[Unreleased]: https://github.com/miyako520/jello/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/miyako520/jello/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/miyako520/jello/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/miyako520/jello/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/miyako520/jello/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/miyako520/jello/compare/v0.1.1...v0.1.2

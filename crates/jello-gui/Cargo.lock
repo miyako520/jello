@@ -1502,7 +1502,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jello"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "jsonschema",
  "serde_json",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "jello-gui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "eframe",

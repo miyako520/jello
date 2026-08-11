@@ -34,8 +34,12 @@ pub fn save_fixed(source: &Path, contents: &[u8]) -> io::Result<SavedOutput> {
     )
 }
 
-/// Atomically replace `path` with `contents`, refusing to touch the file when
-/// its on-disk content no longer matches `expected_contents`.
+/// Atomically publish `contents` after checking that the on-disk content still
+/// matches `expected_contents`.
+///
+/// The final content check and the platform rename are not a single portable
+/// compare-and-swap operation. This protects against ordinary concurrent
+/// edits, but callers must not treat it as a strict concurrency lock.
 ///
 /// Unlike [`save_fixed`], this never creates a new file; callers should only
 /// use it for files this program wrote earlier in the same session.
@@ -54,10 +58,20 @@ pub fn save_updated(path: &Path, expected_contents: &[u8], contents: &[u8]) -> i
     if let Err(error) = write_result {
         return Err(remove_temporary(&temporary_path, error));
     }
-    verify_file_content_matches(path, expected_contents)?;
-    match fs::rename(&temporary_path, path) {
+    commit_updated_file(&temporary_path, path, expected_contents)
+}
+
+fn commit_updated_file(
+    temporary_path: &Path,
+    path: &Path,
+    expected_contents: &[u8],
+) -> io::Result<()> {
+    if let Err(error) = verify_file_content_matches(path, expected_contents) {
+        return Err(remove_temporary(temporary_path, error));
+    }
+    match fs::rename(temporary_path, path) {
         Ok(()) => Ok(()),
-        Err(error) => Err(remove_temporary(&temporary_path, error)),
+        Err(error) => Err(remove_temporary(temporary_path, error)),
     }
 }
 
@@ -436,4 +450,36 @@ extern "system" {
         buffer: *mut u16,
         file_part: *mut *mut u16,
     ) -> u32;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::commit_updated_file;
+
+    #[test]
+    fn concurrent_update_check_removes_the_prepared_temporary_file() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "jello-output-commit-conflict-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("data.fixed.json");
+        let temporary_path = directory.join(".data.update");
+        fs::write(&path, b"externally changed").unwrap();
+        fs::write(&temporary_path, b"prepared replacement").unwrap();
+
+        let error = commit_updated_file(&temporary_path, &path, b"expected content").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(!temporary_path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"externally changed");
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

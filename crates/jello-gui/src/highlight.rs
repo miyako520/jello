@@ -3,6 +3,8 @@ use std::ops::Range;
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Color32, FontId, Stroke};
 
+const MAX_HIGHLIGHT_SPANS: usize = 100_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OverlayState {
     Pending,
@@ -37,6 +39,12 @@ pub struct TokenSpan {
 }
 
 pub fn token_spans(source: &str) -> Vec<TokenSpan> {
+    if source.len() > jello::MAX_INPUT_BYTES {
+        return vec![TokenSpan {
+            range: 0..source.len(),
+            class: TokenClass::Plain,
+        }];
+    }
     let bytes = source.as_bytes();
     let mut spans = Vec::new();
     let mut index = 0;
@@ -143,6 +151,12 @@ pub fn token_spans(source: &str) -> Vec<TokenSpan> {
                 }
             }
         };
+        if spans.len() == MAX_HIGHLIGHT_SPANS {
+            return vec![TokenSpan {
+                range: 0..source.len(),
+                class: TokenClass::Plain,
+            }];
+        }
         spans.push(TokenSpan {
             range: start..index,
             class,
@@ -331,9 +345,20 @@ mod tests {
     use eframe::epaint::text::ByteRangeExt;
 
     use super::{
-        OverlayRange, OverlayState, TokenCache, TokenClass, layout_job_with_spans, overlay_color,
-        overlay_underline_color, token_spans,
+        MAX_HIGHLIGHT_SPANS, OverlayRange, OverlayState, TokenCache, TokenClass,
+        layout_job_with_spans, overlay_color, overlay_underline_color, token_spans,
     };
+
+    #[test]
+    fn fragmented_large_input_degrades_to_one_plain_span() {
+        let source = "@".repeat(MAX_HIGHLIGHT_SPANS + 1);
+
+        let spans = token_spans(&source);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].range, 0..source.len());
+        assert_eq!(spans[0].class, TokenClass::Plain);
+    }
 
     #[test]
     fn token_cache_reuses_spans_for_unchanged_source() {

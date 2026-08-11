@@ -38,9 +38,14 @@ fn read_bytes_limited(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "input limit is too large"))?;
     let read_limit = u64::try_from(capacity)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "input limit is too large"))?;
+    let initial_capacity = usize::try_from(metadata.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "input size is too large"))?
+        .checked_add(1)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "input size is too large"))?
+        .min(capacity);
     let mut bytes = Vec::new();
     bytes
-        .try_reserve_exact(capacity)
+        .try_reserve_exact(initial_capacity)
         .map_err(|_| io::Error::other("allocation failed while reading input"))?;
     file.take(read_limit).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
@@ -56,7 +61,26 @@ fn read_bytes_limited(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
 mod tests {
     use std::io;
 
-    use super::read_utf8_file_stable_with;
+    use super::{read_bytes_limited, read_utf8_file_stable_with};
+
+    #[test]
+    fn small_file_does_not_retain_the_full_input_limit_capacity() {
+        let path = std::env::temp_dir().join(format!(
+            "jello-stable-input-{}-small-capacity.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "{}").unwrap();
+
+        let bytes = read_bytes_limited(&path, crate::MAX_INPUT_BYTES).unwrap();
+
+        assert_eq!(bytes, b"{}");
+        assert!(
+            bytes.capacity() < 64 * 1024,
+            "capacity was {}",
+            bytes.capacity()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn changing_a_file_between_reads_is_rejected() {

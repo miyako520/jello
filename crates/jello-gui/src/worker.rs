@@ -1,9 +1,9 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::mpsc::{self, Receiver, SendError, Sender, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 #[cfg(test)]
 use std::time::Duration;
@@ -47,25 +47,26 @@ pub struct AnalysisResult {
 }
 
 pub struct AnalysisWorker {
-    requests: Sender<AnalysisRequest>,
+    requests: Arc<LatestRequestSlot>,
     results: Receiver<AnalysisResult>,
     latest_generation: Arc<AtomicU64>,
 }
 
 impl AnalysisWorker {
     pub fn new(context: eframe::egui::Context) -> Self {
-        let (request_tx, request_rx) = mpsc::channel::<AnalysisRequest>();
+        let requests = Arc::new(LatestRequestSlot::default());
+        let worker_requests = requests.clone();
         let (result_tx, result_rx) = mpsc::channel();
         let latest_generation = Arc::new(AtomicU64::new(0));
         let worker_generation = latest_generation.clone();
 
         thread::Builder::new()
             .name("jello-analysis".to_string())
-            .spawn(move || run_worker(request_rx, result_tx, context, worker_generation))
+            .spawn(move || run_worker(worker_requests, result_tx, context, worker_generation))
             .expect("failed to start Jello analysis worker");
 
         Self {
-            requests: request_tx,
+            requests,
             results: result_rx,
             latest_generation,
         }
@@ -78,7 +79,7 @@ impl AnalysisWorker {
 
     pub fn submit(&self, request: AnalysisRequest) -> Result<(), SendError<AnalysisRequest>> {
         self.invalidate(request.generation());
-        self.requests.send(request)
+        self.requests.submit(request)
     }
 
     pub fn try_recv(&self) -> Result<AnalysisResult, TryRecvError> {
@@ -91,17 +92,71 @@ impl AnalysisWorker {
     }
 }
 
+impl Drop for AnalysisWorker {
+    fn drop(&mut self) {
+        self.requests.close();
+    }
+}
+
+#[derive(Default)]
+struct LatestRequestSlot {
+    state: Mutex<LatestRequestState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct LatestRequestState {
+    pending: Option<AnalysisRequest>,
+    closed: bool,
+}
+
+impl LatestRequestSlot {
+    fn submit(&self, request: AnalysisRequest) -> Result<(), SendError<AnalysisRequest>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            return Err(SendError(request));
+        }
+        state.pending = Some(request);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    fn recv(&self) -> Option<AnalysisRequest> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while state.pending.is_none() && !state.closed {
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.pending.take()
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.closed = true;
+        state.pending = None;
+        self.ready.notify_one();
+    }
+}
+
 fn run_worker(
-    requests: Receiver<AnalysisRequest>,
+    requests: Arc<LatestRequestSlot>,
     results: Sender<AnalysisResult>,
     context: eframe::egui::Context,
     latest_generation: Arc<AtomicU64>,
 ) {
     let mut schema_engine = SchemaEngine::default();
-    while let Ok(mut request) = requests.recv() {
-        while let Ok(newer) = requests.try_recv() {
-            request = newer;
-        }
+    while let Some(request) = requests.recv() {
         let Some(result) = analyze(request, &mut schema_engine, &latest_generation) else {
             continue;
         };
@@ -250,7 +305,31 @@ mod tests {
 
     use crate::schema_engine::{SchemaEngine, SchemaState};
 
-    use super::{AnalysisRequest, AnalysisWorker, analyze, analyze_for_test, finish_analyze};
+    use super::{
+        AnalysisRequest, AnalysisWorker, LatestRequestSlot, analyze, analyze_for_test,
+        finish_analyze,
+    };
+
+    #[test]
+    fn pending_request_slot_keeps_only_the_latest_request() {
+        let slot = LatestRequestSlot::default();
+        slot.submit(AnalysisRequest::Analyze {
+            generation: 1,
+            source: "old".to_string(),
+            schema_path: None,
+        })
+        .unwrap();
+        slot.submit(AnalysisRequest::Analyze {
+            generation: 2,
+            source: "new".to_string(),
+            schema_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(slot.recv().unwrap().generation(), 2);
+        slot.close();
+        assert!(slot.recv().is_none());
+    }
 
     #[test]
     fn repairable_json5_produces_a_pending_plan_and_strict_preview() {
